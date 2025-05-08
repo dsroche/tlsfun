@@ -116,7 +116,8 @@ class _ClientHandshake:
         self._rwriter = rwriter
         self.send_hello()
 
-    def _send_hs_msg(self, typ, vers=Version.TLS_1_2, raw):
+    def _send_hs_msg(self, typ, vers=Version.TLS_1_2, raw=None):
+        assert raw is not None
         logger.info(f"sending hs message {typ} to server")
         self._rwriter.send(
             typ     = ContentType.HANDSHAKE,
