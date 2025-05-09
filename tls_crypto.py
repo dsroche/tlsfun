@@ -7,19 +7,24 @@ this module just provides the "glue code" to give a consistent interface
 for how they are used in TLS.
 """
 
+from datetime import timedelta
+from datetime import datetime
+
 from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey, X25519PublicKey
 from cryptography.hazmat.primitives.asymmetric.x448 import X448PrivateKey, X448PublicKey
 from cryptography.hazmat.primitives.hashes import Hash, SHA256, SHA384, SHA512
+from cryptography.hazmat.primitives.asymmetric import ec, rsa
 from cryptography.hazmat.primitives.asymmetric.ec import ECDSA, SECP256R1, SECP384R1, SECP521R1
-from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
-from cryptography.hazmat.primitives.asymmetric.ed448 import Ed448PublicKey
-from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat, load_der_public_key, load_pem_private_key
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+from cryptography.hazmat.primitives.asymmetric.ed448 import Ed448PrivateKey
+from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat, PrivateFormat, NoEncryption, load_der_public_key, load_pem_private_key
 from cryptography.hazmat.primitives.hmac import HMAC
 from cryptography.hazmat.primitives.kdf.hkdf import HKDFExpand
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM, AESCCM, ChaCha20Poly1305
 from cryptography.hazmat.primitives.asymmetric import padding as crypto_padding
 from cryptography.exceptions import InvalidSignature
 from cryptography import x509
+from cryptography.x509.oid import NameOID
 
 from tls_common import *
 from tls13_spec import NamedGroup, SignatureScheme, CipherSuite, HkdfLabel
@@ -76,6 +81,13 @@ class _PycaSig:
     def __init__(self, **sig_options):
         self._sig_options = sig_options
 
+    def gen_private(self):
+        return pyca_to_bytes(self._gen_private_pyca())
+
+    def get_public(self, privkey):
+        return pyca_to_bytes(
+            pyca_from_bytes(privkey, private=True).public_key())
+
     def sign(self, privkey, data):
         key = pyca_from_bytes(privkey, private=True)
         return key.sign(
@@ -101,13 +113,19 @@ class _PycaECDSA(_PycaSig):
         super().__init__(
             signature_algorithm = ECDSA(hash_alg()),
         )
-        # note, curve not used
+        self._curve = curve
+
+    def _gen_private_pyca(self):
+        return ec.generate_private_key(self._curve())
 
 
 class _PycaEdDSA(_PycaSig):
-    def __init__(self, PubKey):
+    def __init__(self, KeyClass):
         super().__init__()
-        # note, Pubkey not used
+        self._KeyClass = KeyClass
+
+    def _gen_private_pyca(self):
+        return self._KeyClass.generate()
 
 
 class _PycaRSA(_PycaSig):
@@ -126,6 +144,12 @@ class _PycaRSA(_PycaSig):
         super().__init__(
             padding   = pad,
             algorithm = hash_alg(),
+        )
+
+    def _gen_private_pyca(self):
+        return rsa.generate_private_key(
+            public_exponent = 65537,
+            key_size        = 4096,
         )
 
 
@@ -150,6 +174,8 @@ def extract_x509_pubkey(raw_cert):
 def get_sig_alg(scheme):
     """Given a SignatureScheme, returns an object to do digital signature verification.
     The returned object sigscheme will have:
+        sigscheme.gen_private() -> privkey
+        sigscheme.get_public(privkey) -> pubkey
         sigscheme.sign(privkey, data) -> bytes
         sigscheme.verify(pubkey, signature, data) -> bool
             (*** note we are using a return value here instead of exceptions
@@ -164,9 +190,9 @@ def get_sig_alg(scheme):
             return _PycaECDSA(SECP521R1, SHA512)
 
         case SignatureScheme.ED25519:
-            return _PycaEdDSA(Ed25519PublicKey)
+            return _PycaEdDSA(Ed25519PrivateKey)
         case SignatureScheme.ED448:
-            return _PycaEdDSA(Ed448PublicKey)
+            return _PycaEdDSA(Ed448PrivateKey)
 
         case (SignatureScheme.RSA_PSS_RSAE_SHA256 | SignatureScheme.RSA_PSS_PSS_SHA256):
             return _PycaRSA.pss(SHA256)
@@ -385,3 +411,32 @@ def derive_secret(hash_alg, secret, label, msg_digest):
     return hkdf_expand_label(hash_alg, secret=secret, label=label,
                              cont=msg_digest, length=hash_alg.digest_size)
 
+
+def gen_cert(
+        name='localhost',
+        sig_alg=DEFAULT_SIGNATURE_SCHEMES[0]
+        ):
+    """Generates a new self-signed X509 certificate.
+
+    A fresh signature keypair is generated and the private key
+    is returned in a bytes encoding.
+
+    The cert is valid for 1 year from the current date and has a
+    randomly-chosen serial number.
+
+    The certificate itself is returned in DER encoding (also bytes).
+
+    Returns a tuple (private_key, certificate)."""
+    sigscheme = get_sig_alg(sig_alg)
+    private_key = sigscheme.gen_private()
+    cert = (x509.CertificateBuilder()
+        .subject_name(x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, name)]))
+        .issuer_name(x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, name)]))
+        .not_valid_before(datetime.today() - timedelta(days=1))
+        .not_valid_after(datetime.today() + timedelta(days=365))
+        .serial_number(x509.random_serial_number())
+        .public_key(pyca_from_bytes(sigscheme.get_public(private_key)))
+        .add_extension(x509.SubjectAlternativeName([x509.DNSName(name)]),critical=False)
+        .add_extension(x509.BasicConstraints(ca=False,path_length=None), critical=True)
+        .sign(private_key=pyca_from_bytes(private_key, private=True), algorithm=SHA256()))
+    return (private_key, cert.public_bytes(Encoding.DER))
