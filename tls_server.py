@@ -20,6 +20,9 @@ class _ServerHandshake:
         self._state = ServerState.START
         self._hs_trans = HandshakeTranscript()
         self._key_calc = KeyCalc(self._hs_trans)
+        self._sh_exts = []
+        self._ee_exts = []
+        self._exts_received = set()
 
     @property
     def started(self):
@@ -85,10 +88,54 @@ class _ServerHandshake:
             self._cipher_suite = csuite
             break
         else:
-            raise TlsError(f"unsupported cipher suites: {body.ciphers}")
+            raise TlsError(f"no supported cipher suites in {body.ciphers}")
 
-        #TODO HERE
+        for ext in body.extensions:
+            self._process_client_ext(ext)
 
+    def _process_client_ext(self, ext):
+        assert self._state == ServerState.RECVD_CH
+        self._exts_received.add(ext.typ)
+        match ext.typ:
+            case ExtensionType.SUPPORTED_VERSIONS:
+                if Version.TLS_1_3 not in ext.data:
+                    raise TlsError("client does not support TLS 1.3")
+                self._sh_exts.append(kwdict(
+                    typ = ExtensionType.SUPPORTED_VERSIONS,
+                    data = Version.TLS_1_3,
+                ))
+            case ExtensionType.SERVER_NAME:
+                logger.info(f"Client sent SNI with hostname '{ext.data.host_name}'")
+            case ExtensionType.SIGNATURE_ALGORITHMS:
+                # TODO deal with cerver cert
+                pass
+            case ExtensionType.SUPPORTED_GROUPS:
+                for grp in ext.data:
+                    try:
+                        get_kex_alg(grp)
+                    except ValueError:
+                        continue
+                    break
+                else:
+                    raise TlsError(f"no supported groups in {ext.data}")
+            case ExtensionType.PSK_KEY_EXCHANGE_MODES:
+                raise TlsTODO("server doesn't support PSKs yet") #TODO
+            case ExtensionType.TICKET_REQUEST:
+                raise TlsTODO("server doesn't support PSKs yet") #TODO
+            case ExtensionType.KEY_SHARE:
+                for (group, pubkey) in ext.data:
+                    try:
+                        self._kex_alg = get_kex_alg(group)
+                    except ValueError:
+                        continue
+                    # TODO send server reply to key ext
+                    break
+                else:
+                    raise TlsError(f"no supported group found in key share ext")
+            case ExtensionType.PRE_SHARED_KEY:
+                raise TlsTODO("server doesn't support PSKs yet") #TODO
+            case _:
+                raise TlsError(f"received unrecognized client extension {ext.typ}")
 
 
 
