@@ -3,6 +3,7 @@
 import time
 from collections import namedtuple
 from secrets import SystemRandom
+from random import Random
 
 from spec import kwdict
 from tls_common import *

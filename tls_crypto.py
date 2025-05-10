@@ -1,14 +1,15 @@
 """Cryptographic algorithms and primitives used for TLS.
 
-Includes ciphers, hashes, KDF, key exchange, and signatures.
+Includes ciphers, hashes, KDF, key exchange, and signatures,
+as well as X509 certificate generation.
 
 Most of these are actually implemented by the python cryptography library;
 this module just provides the "glue code" to give a consistent interface
 for how they are used in TLS.
 """
 
-from datetime import timedelta
-from datetime import datetime
+from datetime import timedelta, datetime
+from collections import namedtuple
 
 from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey, X25519PublicKey
 from cryptography.hazmat.primitives.asymmetric.x448 import X448PrivateKey, X448PublicKey
@@ -28,6 +29,9 @@ from cryptography.x509.oid import NameOID
 
 from tls_common import *
 from tls13_spec import NamedGroup, SignatureScheme, CipherSuite, HkdfLabel
+
+
+CertSecrets = namedtuple('CertSecrets', 'sig_alg private_key cert_der')
 
 
 class _XKex:
@@ -424,9 +428,7 @@ def gen_cert(
     The cert is valid for 1 year from the current date and has a
     randomly-chosen serial number.
 
-    The certificate itself is returned in DER encoding (also bytes).
-
-    Returns a tuple (private_key, certificate)."""
+    Returns a CertSecrets tuple."""
     sigscheme = get_sig_alg(sig_alg)
     private_key = sigscheme.gen_private()
     cert = (x509.CertificateBuilder()
@@ -439,4 +441,8 @@ def gen_cert(
         .add_extension(x509.SubjectAlternativeName([x509.DNSName(name)]),critical=False)
         .add_extension(x509.BasicConstraints(ca=False,path_length=None), critical=True)
         .sign(private_key=pyca_from_bytes(private_key, private=True), algorithm=SHA256()))
-    return (private_key, cert.public_bytes(Encoding.DER))
+    return CertSecrets(
+        sig_alg = sig_alg,
+        private_key = private_key,
+        cert_der = cert.public_bytes(Encoding.DER),
+    )

@@ -1,5 +1,8 @@
 """Logic for TLS 1.3 server-side handshake."""
 
+from secrets import SystemRandom
+from random import Random
+
 from tls_common import *
 from tls13_spec import (
     ServerState,
@@ -12,12 +15,14 @@ from tls_keycalc import (
 )
 
 class Server(Connection):
-    def __init__(self):
-        super().__init__(self, None, _ServerHandshake())
+    def __init__(self, cert_secrets, rseed=None)
+        super().__init__(self, None, _ServerHandshake(cert_secrets, rseed))
 
 class _ServerHandshake:
-    def __init__(self):
+    def __init__(self, cert_secrets, rseed):
         self._state = ServerState.START
+        self._cert_secrets = cert_secrets
+        self._rgen = SystemRandom() if rseed is None else Random(seed)
         self._hs_trans = HandshakeTranscript()
         self._key_calc = KeyCalc(self._hs_trans)
         self._sh_exts = []
@@ -34,7 +39,7 @@ class _ServerHandshake:
 
     @property
     def can_send(self):
-        return ServerState.NEGOTIATED <= self._state <= ServerState.CONNECTED
+        return ServerState.WAIT_EOED <= self._state <= ServerState.CONNECTED
 
     @property
     def can_recv(self):
@@ -79,6 +84,8 @@ class _ServerHandshake:
         assert self._state == ServerState.START
         self._state = ServerState.RECVD_CH
 
+        ## negotiate parameters
+
         for csuite in body.ciphers:
             try:
                 self._hash_alg = get_hash_alg(csuite)
@@ -92,6 +99,92 @@ class _ServerHandshake:
 
         for ext in body.extensions:
             self._process_client_ext(ext)
+
+        if ExtensionType.SUPPORTED_VERSIONS not in self._exts_received:
+            raise TlsError("client does not support TLS 1.3")
+        if ExtensionType.KEY_SHARE not in self._exts_received:
+            # TODO allow for PSK-only mode
+            raise TlsError("client did not provide a key exchange share")
+
+        self._state = ServerState.NEGOTIATED
+
+        ## construct and send server hello
+
+        sh_raw = Handshake.pack(
+            typ = HandshakeType.SERVER_HELLO,
+            body = kwdict(
+                server_random = self._rgen.randbytes(32),
+                session_id    = body.session_id,
+                cipher_suite  = self._cipher_suite,
+                extensions    = self._sh_exts,
+            ),
+        )
+
+        self._send_hs_msg(typ=HandshakeType.SERVER_HELLO, raw=sh_raw)
+        logger.info(f'sent SH')
+
+        ## send ccs and update handshake sending key
+
+        self._rwriter.send(typ=ContentType.CHANGE_CIPHER_SPEC, payload=b'\x01')
+        logger.info(f'sent change cipher spec to client')
+
+        self._rwriter.rekey(self._cipher, self._hash_alg,
+                            self._key_calc.server_handshake_traffic_secret)
+        logger.info(f'switched to handshake encryption for sending')
+
+        ## construct and send encrypted extensions
+
+        ee_raw = Handshake.pack(
+            typ  = HandshakeType.ENCRYPTED_EXTENSIONS,
+            body = [],
+        )
+        self._send_hs_msg(typ=HandshakeType.ENCRYPTED_EXTENSIONS, raw=ee_raw)
+        logger.info(f'sent EE')
+
+        ## send Cert and CV
+
+        cert_raw = Handshake.pack(
+            typ  = HandshakeType.CERTIFICATE,
+            body = kwdict(
+                certificate_request_context = b'',
+                certificate_list = [kwdict(
+                    cert_data  = self._cert_secrets.cert_der,
+                    extensions = b'',
+                )],
+            ),
+        )
+        self._send_hs_msg(typ=HandshakeType.CERTIFICATE, raw=cert_raw)
+        logger.info(f'sent Cert')
+
+        cvsig = get_sig_alg(self._cert_secrets.sig_alg).sign(
+            self._cert_secrets.private_key, self._key_calc.server_cv_message)
+        cv_raw = Handshake.pack(
+            typ  = HandshakeType.CERTIFICATE_VERIFY,
+            body = kwdict(
+                algorithm = self._cert_secrets.sig_alg,
+                signature = cvsig,
+            ),
+        )
+        self._send_hs_msg(typ=HandshakeType.CERTIFICATE_VERIFY, raw=cv_raw)
+        logger.info(f'sent CV')
+
+        ## send finished
+
+        sf_raw = Handshake.pack(
+            typ  = HandshakeType.FINISHED,
+            body = self._key_calc.server_finished_verify,
+        )
+        self._send_hs_msg(typ=HandshakeType.FINISHED, raw=sf_raw)
+        logger.info(f'sent SF')
+
+        ## update sending key and state
+
+        self._rwriter.rekey(self._cipher, self._hash_alg,
+                            self._key_calc.server_application_traffic_secret)
+        logger.info(f'switched to application key for sending')
+
+        self._state = ServerState.WAIT_FLIGHT2
+
 
     def _process_client_ext(self, ext):
         assert self._state == ServerState.RECVD_CH
@@ -107,8 +200,8 @@ class _ServerHandshake:
             case ExtensionType.SERVER_NAME:
                 logger.info(f"Client sent SNI with hostname '{ext.data.host_name}'")
             case ExtensionType.SIGNATURE_ALGORITHMS:
-                # TODO deal with cerver cert
-                pass
+                if self._cert_secrets.sig_alg not in ext.data:
+                    raise TlsError(f"client doesn't support sig {self._cert_secrets.sig_alg}")
             case ExtensionType.SUPPORTED_GROUPS:
                 for grp in ext.data:
                     try:
@@ -125,10 +218,18 @@ class _ServerHandshake:
             case ExtensionType.KEY_SHARE:
                 for (group, pubkey) in ext.data:
                     try:
-                        self._kex_alg = get_kex_alg(group)
+                        kex_alg = get_kex_alg(group)
                     except ValueError:
                         continue
-                    # TODO send server reply to key ext
+                    kex_private = kex_alg.gen_private(self._rgen)
+                    self._sh_exts.append(kwdict(
+                        typ  = ExtensionType.KEY_SHARE,
+                        data = kwdict(
+                            group  = group,
+                            pubkey = kex_alg.get_public(kex_private),
+                        ),
+                    ))
+                    self._key_calc.kex_secret = kex_alg.exchange(kex_private, pubkey)
                     break
                 else:
                     raise TlsError(f"no supported group found in key share ext")
