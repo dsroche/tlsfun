@@ -144,16 +144,22 @@ class SignatureScheme(IntEnum, metaclass=_FixedEnum, bytelen=2):
 
 
 class NamedGroup(IntEnum, metaclass=_FixedEnum, bytelen=2):
-    SECP256R1 = 0x0017
-    SECP384R1 = 0x0018
-    SECP521R1 = 0x0019
-    X25519    = 0x001d
-    X448      = 0x001e
-    FFDHE2048 = 0x0100
-    FFDHE3072 = 0x0101
-    FFDHE4096 = 0x0102
-    FFDHE6144 = 0x0103
-    FFDHE8192 = 0x0104
+    SECP256R1   = 0x0017
+    SECP384R1   = 0x0018
+    SECP521R1   = 0x0019
+    X25519      = 0x001d
+    X448        = 0x001e
+    FFDHE2048   = 0x0100
+    FFDHE3072   = 0x0101
+    FFDHE4096   = 0x0102
+    FFDHE6144   = 0x0103
+    FFDHE8192   = 0x0104
+    UNSUPPORTED = 0xFFFF
+
+    @classmethod
+    def _missing_(cls, value):
+        logger.info(f'Saw unsupported named group with value {value} = 0x{hex(value)}')
+        return cls.UNSUPPORTED
 
 
 class CipherSuite(IntEnum, metaclass=_FixedEnum, bytelen=2):

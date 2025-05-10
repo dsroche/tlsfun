@@ -2,8 +2,11 @@
 
 from secrets import SystemRandom
 from random import Random
-from threading import Thread
+import threading
+from threading import Thread, current_thread
+import logging
 import socket
+from io import StringIO
 
 from spec import kwdict, UnpackError
 from tls_common import *
@@ -296,19 +299,61 @@ def serve_once(hostname='localhost', port=5000, cert_secrets=None, rseed=None):
         return server
 
 
-def start_server(hostname='localhost', port=5000, cert_secrets=None, rseed=None):
+class _ThreadLogFilter(logging.Filter):
+    # inspired by https://stackoverflow.com/a/55035193/1008966
+    def __init__(self, tname, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._tname = tname
+
+    def filter(self, record):
+        return record.threadName == self._tname
+
+
+server_thread_info = threading.local()
+
+
+class _ServerThread:
+    def __init__(self, handler, cert_secrets, rseed):
+        self._server = Server(cert_secrets, rseed)
+        self._handler = handler
+
+    def __call__(self, sock, addr):
+        tname = current_thread().name
+        server_thread_info.log_buffer = StringIO()
+        log_handle = logging.StreamHandler(server_thread_info.log_buffer)
+        log_handle.setLevel(logging.INFO)
+        log_handle.setFormatter(logging.Formatter())
+        log_handle.addFilter(_ThreadLogFilter(tname))
+        logger.addHandler(log_handle)
+        logger.info(f'started connection from client at {addr}')
+        try:
+            self._server.connect_socket(sock)
+            self._handler(self._server)
+        finally:
+            logger.removeHandler(log_handle)
+
+
+def start_server(handler, hostname='localhost', port=5000, cert_secrets=None, rseed=None):
+    """Starts a server that calls a handler to handle each connection.
+
+    Handler should be runnable and accept one argument of type Server.
+    The Server object will be connected before the handler is started.
+    Each connection will run in a separate thread.
+    """
     if cert_secrets is None:
         logger.info('generating new self-signed server cert')
         cert_secrets = gen_cert(hostname)
 
+    count = 1
     with socket.create_server((hostname, port)) as ssock:
         while True:
             logger.info(f'listening for connection to {hostname} on port {port}')
             sock, addr = ssock.accept()
-            logger.info(f'got a connection from {addr}')
-            newserv = Server(cert_secrets, rseed)
-            if rseed is not None:
-                rseed += 1
-            sthread = Thread(target=newserv.connect_socket, args=(sock,))
+            st = _ServerThread(handler, cert_secrets, rseed)
+            tname = f's{count}'
+            sthread = Thread(name=tname, target=st, args=(sock,addr,))
             logger.info(f'launching new thread to handle client connection')
             sthread.start()
+            count += 1
+            if rseed is not None:
+                rseed += 1
