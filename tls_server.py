@@ -25,6 +25,7 @@ from tls_records import (
 from tls_keycalc import (
     KeyCalc,
     HandshakeTranscript,
+    ServerTicketer,
 )
 from tls_crypto import (
     gen_cert,
@@ -35,13 +36,18 @@ from tls_crypto import (
 )
 
 class Server(Connection):
-    def __init__(self, cert_secrets, rseed=None):
-        super().__init__(None, _ServerHandshake(cert_secrets, rseed))
+    """Handles a single TLS 1.3 connection from the server side."""
+
+    def __init__(self, cert_secrets, ticketer, rseed=None):
+        super().__init__(None, _ServerHandshake(cert_secrets, ticketer, rseed))
+
 
 class _ServerHandshake:
-    def __init__(self, cert_secrets, rseed):
+    def __init__(self, cert_secrets, ticketer, rseed):
         self._state = ServerState.START
         self._cert_secrets = cert_secrets
+        self._ticketer = ticketer
+        self._ticket_count = 0
         self._rgen = SystemRandom() if rseed is None else Random(seed)
         self._hs_trans = HandshakeTranscript()
         self._key_calc = KeyCalc(self._hs_trans)
@@ -245,8 +251,6 @@ class _ServerHandshake:
                 for mode in ext.data:
                     logger.info(f'client allows kex mode {mode}')
                     self._kex_modes.add(mode)
-            case ExtensionType.TICKET_REQUEST:
-                raise TlsTODO("server doesn't support PSKs yet") #TODO
             case ExtensionType.KEY_SHARE:
                 for (group, pubkey) in ext.data:
                     try:
@@ -267,9 +271,14 @@ class _ServerHandshake:
                 else:
                     raise TlsError(f"no supported group found in key share ext")
             case ExtensionType.PRE_SHARED_KEY:
-                raise TlsTODO("server doesn't support PSKs yet") #TODO
+                for (index, psk_identity) in ext.data.identitites:
+                    logger.info(f'trying client-provided ticket {pformat(psk_identity.identity)}')
+                    psk = use_ticket(psk_identity, self._key_calc.cipher_suite)
+                    if psk is not None:
+                        logger.info(f'derived valid PSK {pformat(psk)}')
+                        self._key_calc.psk = psk
             case _:
-                logger.info(f'IGNORING unrecognized extension {ext.typ}')
+                logger.info(f'IGNORING extension with type {ext.typ}')
 
 
     def _process_finished(self, body):
@@ -279,6 +288,33 @@ class _ServerHandshake:
         self._rreader.rekey(self._cipher, self._hash_alg,
                             self._key_calc.client_application_traffic_secret)
         self._state = ServerState.CONNECTED
+
+        if self._ticketer is not None:
+            logger.info('sending two reconnect tickets')
+            self.send_ticket()
+            self.send_ticket()
+
+
+    def send_ticket(self, lifetime=60*60, current_time=None):
+        """Generates and sends a fresh Ticket struct to the client.
+
+        lifetime is the expiration lifetime, in seconds (default 1 hour).
+        """
+        self._ticket_count += 1
+        ticket_nonce = self._ticket_count.to_bytes()
+
+        ticket = self._ticketer.gen_ticket(
+            secret = self._key_calc.ticket_secret(ticket_nonce),
+            nonce = ticket_nonce,
+            lifetime = lifetime,
+            csuite = self._key_calc.cipher_suite,
+            current_time = current_time,
+        )
+
+        self._send_hs_msg(
+            typ = HandshakeType.NEW_SESSION_TICKET,
+            raw = Handshake.pack(typ=HandshakeType.NEW_SESSION_TICKET, body=ticket),
+        )
 
 
 def serve_once(hostname='localhost', port=5000, cert_secrets=None, rseed=None):
@@ -294,7 +330,7 @@ def serve_once(hostname='localhost', port=5000, cert_secrets=None, rseed=None):
         logger.info(f'listening for connection to {hostname} on port {port}')
         sock, addr = ssock.accept()
         logger.info(f'got a connection from {addr}')
-        server = Server(cert_secrets, rseed)
+        server = Server(cert_secrets, None, rseed)
         server.connect_socket(sock)
         return server
 
@@ -313,8 +349,8 @@ server_thread_info = threading.local()
 
 
 class _ServerThread:
-    def __init__(self, handler, cert_secrets, rseed):
-        self._server = Server(cert_secrets, rseed)
+    def __init__(self, handler, *args, **kwargs):
+        self._server = Server(*args, **kwargs)
         self._handler = handler
 
     def __call__(self, sock, addr):
@@ -344,12 +380,14 @@ def start_server(handler, hostname='localhost', port=5000, cert_secrets=None, rs
         logger.info('generating new self-signed server cert')
         cert_secrets = gen_cert(hostname)
 
+    ticketer = ServerTicketer()
+
     count = 1
     with socket.create_server((hostname, port)) as ssock:
         while True:
             logger.info(f'listening for connection to {hostname} on port {port}')
             sock, addr = ssock.accept()
-            st = _ServerThread(handler, cert_secrets, rseed)
+            st = _ServerThread(handler, cert_secrets, ticketer, rseed)
             tname = f's{count}'
             sthread = Thread(name=tname, target=st, args=(sock,addr,))
             logger.info(f'launching new thread to handle client connection')

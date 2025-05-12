@@ -252,6 +252,11 @@ common_extensions = {
         : Bounded(1, Version.TLS_1_3.as_const()),
 }
 
+PskIdentity = Struct(
+    identity              = Bounded(2, Raw),
+    obfuscated_ticket_age = Integer(4),
+)
+
 PskBinders = Bounded(2, Sequence(Bounded(1, Raw)))
 
 ClientExtension = Select(
@@ -270,10 +275,7 @@ ClientExtension = Select(
             ),
         ExtensionType.PRE_SHARED_KEY
             : Struct(
-                identities = Bounded(2, Sequence(Struct(
-                    identity              = Bounded(2, Raw),
-                    obfuscated_ticket_age = Integer(4),
-                ))),
+                identities = Bounded(2, Sequence(PskIdentity)),
                 binders    = PskBinders,
             ),
     })

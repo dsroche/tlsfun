@@ -4,9 +4,12 @@ Includes code for pre-shared keys (i.e. tickets)."""
 
 import time
 import json
+import os
+
+from cryptography.hazmat.primitives.ciphers.aead import ChaCha20Poly1305
 
 from util import b64enc, b64dec
-from spec import kwdict
+from spec import kwdict, Struct, Integer, Bounded, Raw
 from tls_common import *
 from tls13_spec import (
     Handshake,
@@ -15,6 +18,7 @@ from tls13_spec import (
     PskBinders,
     CipherSuite,
     PskKeyExchangeMode,
+    Ticket,
 )
 from tls_crypto import (
     get_hash_alg,
@@ -236,19 +240,23 @@ class KeyCalc:
     def __init__(self, hs_trans):
         super().__setattr__('_mem', {})
         self._hs_trans = hs_trans
+        self._ticket_counter = [0]
 
-    def ticket_info(self, ticket, *args, **kwargs):
+    def ticket_secret(self, ticket_nonce):
         # rfc8446#section-4.6.1
-        ticket_secret = hkdf_expand_label(
+        return hkdf_expand_label(
             hash_alg = self.hash_alg,
             secret   = self.resumption_master_secret,
             label    = b'resumption',
-            cont     = ticket.ticket_nonce,
+            cont     = ticket_nonce,
             length   = self.hash_alg.digest_size,
         )
+
+    def ticket_info(self, ticket, *args, **kwargs):
+        # rfc8446#section-4.6.1
         return TicketInfo(
             ticket_id = ticket.ticket,
-            secret    = ticket_secret,
+            secret    = self.ticket_secret(ticket.ticket_nonce),
             csuite    = self.cipher_suite,
             mask      = ticket.ticket_age_add,
             lifetime  = ticket.ticket_lifetime,
@@ -332,3 +340,105 @@ class KeyCalc:
             value = self.zero
         self._mem[name] = value
 
+
+_ServerTicketPlaintext = Struct(
+    cipher_suite = CipherSuite,
+    expiration = Integer(8),
+    psk = Bounded(2, Raw),
+)
+
+_ServerTicketCiphertext = Struct(
+    inner_ciphertext = Bounded(2, Raw),
+    iv = Bounded(1, Raw),
+)
+
+class ServerTicketer:
+    """Stores server-side data needed to issue and redeem resumption tickets.
+
+    This is implemented using a (fresh) symmetric encryption key.
+    Each ticket value is an encryption of the resumption secret and cipher suite.
+    """
+
+    _AEAD = ChaCha20Poly1305
+    _NONCE_LENGTH = 12
+    _GRACE = 60*10 # grace period (in seconds) for ticket age checks
+
+    def __init__(self):
+        self._cipher = self._AEAD(self._AEAD.generate_key())
+        logger.info("Generated a random key for symmetric encryption of tickets.")
+        self._used = set()
+
+    def _get_current_time(self, hint):
+        return time.time() if hint is None else hint
+
+    def gen_ticket(self, secret, nonce, lifetime, csuite, current_time=None):
+        """Generates a fresh Ticket struct to send to the client.
+
+        secret: ticket resumption PSK
+        nonce: ticket_nonce value (unique within session, used to compute secret)
+        lifetime: seconds until ticket expires
+        csuite: cipher suite used in this session
+        current_time: current time in seconds (None to use current system time)
+        """
+        current_time = self._get_current_time(current_time)
+        expiration = current_time + lifetime
+
+        ptext = _ServerTicketPlaintext.pack(
+            cipher_suite = csuite,
+            expiration = round(expiration),
+            psk = secret,
+        )
+
+        iv = os.urandom(self._NONCE_LENGTH)
+        inner_ctext = self._cipher.encrypt(iv, ptext, iv)
+
+        ctext = _ServerTicketCiphertext.pack(
+            inner_ciphertext = inner_ctext,
+            iv = iv,
+        )
+
+        return Ticket.prepack(
+            ticket_lifetime = lifetime,
+            ticket_age_add = int.from_bytes(os.urandom(4)),
+            ticket_nonce = nonce,
+            ticket = ctext,
+            extensions = [],
+        )
+
+    def use_ticket(self, psk_identity, csuite, current_time=None):
+        current_time = self._get_current_time(current_time)
+
+        ctext = psk_identity.identity
+        # NB psk_identity.obfuscated_ticket_age is ignored
+
+        if ctext in self._used:
+            logger.info('INVALID TICKET: already used')
+            return None
+
+        try:
+            outer = _ServerTicketCiphertext.unpack(ctext)
+        except UnpackError:
+            logger.info('INVALID TICKET: unable to parse client ticket ctext')
+            return None
+
+        try:
+            inner = _ServerTicketPlaintext.unpack(
+                self._cipher.decrypt(outer.iv, outer.inner_ciphertext, outer.iv))
+        except InvalidTag:
+            logger.info('INVALID TICKET: unable to decrypt client ticket')
+            return None
+        except ValueError:
+            logger.info('INVALID TICKET: unable to parse client inner ticket')
+            return None
+
+        if inner.cipher_suite != csutie:
+            logger.info('INVALID TICKET: cipher suite mismatch')
+            return None
+
+        if current_time > inner.expiration + self._GRACE:
+            logger.info('INVALID TICKET: past expiration date')
+            return None
+
+        logger.info(f'received valid ticket {pformat(ctext)}; marking as used')
+        self._used.add(ctext)
+        return inner.psk
