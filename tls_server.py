@@ -8,15 +8,17 @@ import logging
 import socket
 from io import StringIO
 
-from spec import kwdict, UnpackError
+from spec import kwdict, UnpackError, pformat
 from tls_common import *
 from tls13_spec import (
     ServerState,
     Version,
     Handshake,
     HandshakeType,
+    ServerExtension,
     ExtensionType,
     ContentType,
+    PskKeyExchangeMode,
 )
 from tls_records import (
     Connection,
@@ -26,6 +28,7 @@ from tls_keycalc import (
     KeyCalc,
     HandshakeTranscript,
     ServerTicketer,
+    calc_binder_key,
 )
 from tls_crypto import (
     gen_cert,
@@ -111,6 +114,7 @@ class _ServerHandshake:
     def _process_client_hello(self, body):
         assert self._state == ServerState.START
         self._state = ServerState.RECVD_CH
+        self._chello = Handshake.prepack(HandshakeType.CLIENT_HELLO, body)
 
         ## negotiate parameters
 
@@ -131,11 +135,28 @@ class _ServerHandshake:
 
         if ExtensionType.SUPPORTED_VERSIONS not in self._exts_received:
             raise TlsError("client does not support TLS 1.3")
-        if ExtensionType.KEY_SHARE not in self._exts_received:
-            # TODO allow for PSK-only mode
-            raise TlsError("client did not provide a key exchange share")
-        # TODO allow psks
-        self._key_calc.psk = None
+
+        # PSK exchange mode logic
+        use_psk = ExtensionType.PRE_SHARED_KEY in self._exts_received
+        use_dh = ExtensionType.KEY_SHARE in self._exts_received
+
+        if use_psk:
+            if use_dh and PskKeyExchangeMode.PSK_DHE_KE in self._kex_modes:
+                logger.info('using PSK plus DH mode')
+            elif PskKeyExchangeMode.PSK_KE in self._kex_modes:
+                logger.info('using PSK only mode')
+                use_dh = False
+            else:
+                raise TlsError('could not negotiate compatible psk key exchange mode')
+        elif use_dh:
+            logger.info('using DH only mode')
+            self._key_calc.psk = None
+        else:
+            raise TlsError('no PSK or DH extension received!')
+
+        if use_dh:
+            self._sh_exts.append(self._kex_ext)
+            self._key_calc.kex_secret = self._kex_secret
 
         self._state = ServerState.NEGOTIATED
 
@@ -172,32 +193,33 @@ class _ServerHandshake:
         self._send_hs_msg(typ=HandshakeType.ENCRYPTED_EXTENSIONS, raw=ee_raw)
         logger.info(f'sent EE')
 
-        ## send Cert and CV
+        ## send Cert and CV if not using PSKs
 
-        cert_raw = Handshake.pack(
-            typ  = HandshakeType.CERTIFICATE,
-            body = kwdict(
-                certificate_request_context = b'',
-                certificate_list = [kwdict(
-                    cert_data  = self._cert_secrets.cert_der,
-                    extensions = b'',
-                )],
-            ),
-        )
-        self._send_hs_msg(typ=HandshakeType.CERTIFICATE, raw=cert_raw)
-        logger.info(f'sent Cert')
+        if not use_psk:
+            cert_raw = Handshake.pack(
+                typ  = HandshakeType.CERTIFICATE,
+                body = kwdict(
+                    certificate_request_context = b'',
+                    certificate_list = [kwdict(
+                        cert_data  = self._cert_secrets.cert_der,
+                        extensions = b'',
+                    )],
+                ),
+            )
+            self._send_hs_msg(typ=HandshakeType.CERTIFICATE, raw=cert_raw)
+            logger.info(f'sent Cert')
 
-        cvsig = get_sig_alg(self._cert_secrets.sig_alg).sign(
-            self._cert_secrets.private_key, self._key_calc.server_cv_message)
-        cv_raw = Handshake.pack(
-            typ  = HandshakeType.CERTIFICATE_VERIFY,
-            body = kwdict(
-                algorithm = self._cert_secrets.sig_alg,
-                signature = cvsig,
-            ),
-        )
-        self._send_hs_msg(typ=HandshakeType.CERTIFICATE_VERIFY, raw=cv_raw)
-        logger.info(f'sent CV')
+            cvsig = get_sig_alg(self._cert_secrets.sig_alg).sign(
+                self._cert_secrets.private_key, self._key_calc.server_cv_message)
+            cv_raw = Handshake.pack(
+                typ  = HandshakeType.CERTIFICATE_VERIFY,
+                body = kwdict(
+                    algorithm = self._cert_secrets.sig_alg,
+                    signature = cvsig,
+                ),
+            )
+            self._send_hs_msg(typ=HandshakeType.CERTIFICATE_VERIFY, raw=cv_raw)
+            logger.info(f'sent CV')
 
         ## send finished
 
@@ -258,25 +280,36 @@ class _ServerHandshake:
                     except ValueError:
                         continue
                     kex_private = kex_alg.gen_private(self._rgen)
-                    self._sh_exts.append(kwdict(
+                    logger.info(f'negotiated kex alg {group}')
+                    self._kex_ext = ServerExtension.prepack(
                         typ  = ExtensionType.KEY_SHARE,
                         data = kwdict(
                             group  = group,
                             pubkey = kex_alg.get_public(kex_private),
                         ),
-                    ))
-                    logger.info(f'negotiated kex alg {group}')
-                    self._key_calc.kex_secret = kex_alg.exchange(kex_private, pubkey)
+                    )
+                    self._kex_secret = kex_alg.exchange(kex_private, pubkey)
                     break
                 else:
                     raise TlsError(f"no supported group found in key share ext")
             case ExtensionType.PRE_SHARED_KEY:
-                for (index, psk_identity) in ext.data.identitites:
+                for (index, psk_identity) in enumerate(ext.data.identities):
                     logger.info(f'trying client-provided ticket {pformat(psk_identity.identity)}')
-                    psk = use_ticket(psk_identity, self._key_calc.cipher_suite)
+                    psk = self._ticketer.use_ticket(psk_identity, self._key_calc.cipher_suite)
                     if psk is not None:
                         logger.info(f'derived valid PSK {pformat(psk)}')
+                        binder_key = calc_binder_key(self._chello, index, psk, self._key_calc.cipher_suite)
+                        if binder_key != ext.data.binders[index]:
+                            raise TlsError(f"binder key mismatch for selected index {index}")
+
                         self._key_calc.psk = psk
+                        self._sh_exts.append(ServerExtension.prepack(
+                            typ = ExtensionType.PRE_SHARED_KEY,
+                            data = index,
+                        ))
+                        break
+                else:
+                    raise TlsError("none of the provided tickets could be used")
             case _:
                 logger.info(f'IGNORING extension with type {ext.typ}')
 

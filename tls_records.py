@@ -4,7 +4,7 @@ from collections import namedtuple
 
 from tls_common import *
 from util import SetOnce
-from spec import force_write
+from spec import force_write, UnpackError
 from tls13_spec import (
     Record,
     ContentType,

@@ -7,9 +7,10 @@ import json
 import os
 
 from cryptography.hazmat.primitives.ciphers.aead import ChaCha20Poly1305
+from cryptography.exceptions import InvalidTag
 
 from util import b64enc, b64dec
-from spec import kwdict, Struct, Integer, Bounded, Raw
+from spec import kwdict, Struct, Integer, Bounded, Raw, pformat
 from tls_common import *
 from tls13_spec import (
     Handshake,
@@ -116,59 +117,28 @@ class TicketInfo:
         new_chello = chello._asdict() | {'body': body}
 
         # insert actual binder and return the (new) client hello object
-        actual_binder = self.get_binder_key(Handshake.prepack(new_chello), 0)
+        actual_binder = self.get_binder_key(Handshake.prepack(new_chello))
         binder_list[0] = actual_binder
         logger.info(f'inserting psk with id {self._id[:12]}... and  binder {actual_binder} into client hello')
         return Handshake.prepack(new_chello)
 
-    def get_binder_key(self, chello, index, prefix=b''):
-        # chello should be unpacked
-        # binder keys in chello should be filled in but will be ignored
-        # prefix is (optionally) a transcript prefix, e.g. from a hello retry
-        hst = HandshakeTranscript()
-        kc = KeyCalc(hst)
-        kc.cipher_suite = self._csuite
-        hst.add(HandshakeType.SERVER_HELLO, False, prefix)
+    def get_binder_key(self, chello, prefix=b''):
+        """Computes the binder key for this ticket within the given (unpacked) client hello.
 
-        # find index of this ticket
-        exts = chello.body.extensions
-        if not exts or exts[-1].typ != ExtensionType.PRE_SHARED_KEY:
-            raise TlsError("expected PRE_SHARED_KEY extension to come last")
-        pske = exts[-1].data
-        if len(pske.identities) <= index or pske.identities[index].identity != self._id:
-            raise TlsError("did not find this ticket in the identities list")
-
-        raw_hello = Handshake.pack(chello)
-        pbinds = PskBinders.pack(pske.binders)
-        assert raw_hello.endswith(pbinds)
-        hst.add(HandshakeType.CLIENT_HELLO, True, raw_hello[:-len(pbinds)])
-
-        kc.psk = self._secret
-        binder = kc.get_verify_data(kc.binder_key, hst[-1])
-
-        if len(pske.binders) != len(pske.identities) or len(binder) != len(pske.binders[index]):
-            raise TlsError("binder key in clienthello has the wrong length")
-
-        return binder
-
-    def find(self, chello, prefix=b'', age_tolerance=5):
-        """Looks for this ticket in the given (unpacked) client hello.
-        Returns the matching index within the client hello PSK list, or None.
+        prefix is (optionally) a transcript prefix, e.g. from a hello retry.
         """
-        psk_ext = chello.body.extensions[-1]
-        assert psk_ext.typ == ExtensionType.PRE_SHARED_KEY
-        for (index, (ident, oage)) in enumerate(psk_ext.data.identities):
-            if ident == self._id:
-                logger.info(f'found matching ticket id {self._id.hex()[:16]}... at index {index}')
-                if self.get_binder_key(chello, index, prefix) != psk_ext.data.binders[index]:
-                    raise TlsError(f'ticket binder {psk_ext.data.binders[index]} does not match expected {self.get_binder_key(chello, index, prefix)}')
-                age = (oage - self._mask) / 1000
-                if abs(age - (time.time() - self._creation)) > age_tolerance:
-                    raise TlsError(f'ticket age {age} is too far off from expected {time.time() - self._creation}')
-                if age > self._lifetime:
-                    raise TlsError(f'ticket age {age} exceeds lifetime {self._lifetime}')
-                logger.info(f'ticket from {age} seconds ago has valid binder and age')
-                return index
+
+        # find the index
+        try:
+            psk_ext = next(filter(
+                (lambda ext: ext.typ == ExtensionType.PRE_SHARED_KEY),
+                chello.body.extensions))
+            index = next(i for i,ident in enumerate(psk_ext.data.identities)
+                         if ident.identity == self._id)
+        except StopIteration:
+            raise TlsError("this ticket id not found in given client hello") from None
+
+        return calc_binder_key(chello, index, self._secret, self._csuite, prefix)
 
 
 class HandshakeTranscript:
@@ -352,6 +322,7 @@ _ServerTicketCiphertext = Struct(
     iv = Bounded(1, Raw),
 )
 
+
 class ServerTicketer:
     """Stores server-side data needed to issue and redeem resumption tickets.
 
@@ -431,7 +402,7 @@ class ServerTicketer:
             logger.info('INVALID TICKET: unable to parse client inner ticket')
             return None
 
-        if inner.cipher_suite != csutie:
+        if inner.cipher_suite != csuite:
             logger.info('INVALID TICKET: cipher suite mismatch')
             return None
 
@@ -442,3 +413,43 @@ class ServerTicketer:
         logger.info(f'received valid ticket {pformat(ctext)}; marking as used')
         self._used.add(ctext)
         return inner.psk
+
+
+def calc_binder_key(chello, index, secret, csuite, prefix=b''):
+    """Computes the binder key at given index within given (unpacked) client hello.
+
+    The actual binder keys must be filled in (and with the proper lengths)
+    but will be ignored.
+
+    secret is the actual PSK secret, and csuite is the cipher suite to use
+    (should be associated to the PSK).
+
+    Prefix is optionally a transcript prefix before the client hello,
+    such as from a hello retry request.
+    """
+    hst = HandshakeTranscript()
+    kc = KeyCalc(hst)
+    kc.cipher_suite = csuite
+    hst.add(HandshakeType.SERVER_HELLO, False, prefix)
+
+    exts = chello.body.extensions
+    if not exts or exts[-1].typ != ExtensionType.PRE_SHARED_KEY:
+        raise TlsError("PSK extension must come last in client hello")
+
+    pske = exts[-1].data
+    if index >= len(pske.identities) or len(pske.binders) != len(pske.identities):
+        raise TlsError("index out of bounds or mismatch in PSK extension")
+
+    raw_hello = Handshake.pack(chello)
+    pbinds = PskBinders.pack(pske.binders)
+    assert raw_hello.endswith(pbinds)
+    hst.add(HandshakeType.CLIENT_HELLO, True, raw_hello[:-len(pbinds)])
+
+    kc.psk = secret
+    binder = kc.get_verify_data(kc.binder_key, hst[-1])
+
+    if len(binder) != len(pske.binders[index]):
+        raise TlsError("binder key in client hello has the wrong length")
+
+    return binder
+
