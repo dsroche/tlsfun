@@ -30,6 +30,11 @@ should not be used by anyone.**
         git clone https://github.com/syncsynchalt/illustrated-tls13
         ./test_example.py
 
+5.  Test client and server simultaneously on port 12345
+
+        ./test_client_server.py
+
+
 ## Simple HTTPS client and server
 
 The `https_client.py` program can be used to make GET request, optionally using
@@ -56,6 +61,10 @@ Use `--help` for more usage details of both programs.
 
 *   `test_example.py`: Check this implementation against the example in
     Michael Driscoll's [Illustrated TLS 1.3](https://tls13.xargs.org/)
+
+*   `test_client_server.py`: Run TLS client and server in separate
+    threads over a local port and test a few simple connections,
+    including with the use of resumption tickets.
 
 *   `https_client.py`: Runnable python module to create a client connection to
     an HTTPS server running TLS 1.3, optionally saving/using tickets.
