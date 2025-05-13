@@ -45,7 +45,7 @@ Try running it with
 
     ./https_server.py -p 8000
 
-and then visiting `https://localhost:8000/` in your browser.
+and then visiting <https://localhost:8000/> in your browser.
 (Note, you will probably need to click through a warning because
 the certificate is self-signed.)
 

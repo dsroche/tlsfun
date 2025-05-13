@@ -318,11 +318,11 @@ def build_client_hello(
         ticket = None, # reconnect ticket to use as PSK for reconnect
         psk_modes = (PskKeyExchangeMode.PSK_DHE_KE,),
         send_time = None, # default to current time
-        seed = None, # optional seed for repeatability; NOT secure
+        rseed = None, # optional seed for repeatability; NOT secure
         ):
     """Returns (unpacked) ClientHello handshake struct and ClientSecrets tuple."""
 
-    rgen = SystemRandom() if seed is None else Random(seed)
+    rgen = SystemRandom() if rseed is None else Random(rseed)
 
     if ciphers is None:
         if ticket is None:
