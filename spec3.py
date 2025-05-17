@@ -1,6 +1,7 @@
-from typing import Self, BinaryIO, Type, get_args, Iterable
+from typing import Self, BinaryIO, get_args, Iterable
 from dataclasses import dataclass, fields
 from io import BytesIO
+from enum import IntEnum
 
 type Json = int | float | str | bool | None | list[Json] | dict[str, Json]
 
@@ -62,7 +63,7 @@ class FixedSize(Spec):
         return cls.unpack(force_read(src, cls.FIXED_SIZE)), cls.FIXED_SIZE
 
 
-class _Uint(FixedSize, int):
+class Uint(FixedSize, int):
     def __new__(cls, value: int) -> Self:
         return int.__new__(cls, value)
 
@@ -85,24 +86,36 @@ class _Uint(FixedSize, int):
         return self.to_bytes(self.FIXED_SIZE)
 
     @classmethod
-    def unpack(cls, raw: bytes) -> Uint16:
+    def unpack(cls, raw: bytes) -> Self:
         if len(raw) != cls.FIXED_SIZE:
             raise ValueError
-        return Uint16(int.from_bytes(raw))
+        return cls(int.from_bytes(raw))
 
 
-class Uint8(_Uint):
+class Uint8(Uint):
     FIXED_SIZE: int = 1
 
-class Uint16(_Uint):
+class Uint16(Uint):
     FIXED_SIZE: int = 2
 
+class Uint24(Uint):
+    FIXED_SIZE: int = 3
 
-class _Sequence[T: Spec](Spec, list[T]):
-    ITEM_TYPE: Type[T]
+class Uint32(Uint):
+    FIXED_SIZE: int = 4
+
+
+class _Sequence[T: Spec](Spec, tuple[T]):
+    ITEM_TYPE: type[T]
+
+    def __new__(cls, values: Iterable[T]) -> Self:
+        return tuple.__new__(cls, values)
 
     def __init__(self, values: Iterable[T]) -> None:
-        list.__init__(self, values)
+        Spec.__init__(self)
+        for x in self:
+            if not isinstance(x, self.ITEM_TYPE):
+                raise ValueError
 
     def jsonify(self) -> Json:
         return [x.jsonify() for x in self]
@@ -126,24 +139,24 @@ class _Sequence[T: Spec](Spec, list[T]):
         return len(raw)
 
     @classmethod
-    def unpack(cls, raw: bytes) -> Self:
+    def _unpack_items(cls, raw: bytes) -> Iterable[T]:
         buf = BytesIO(raw)
-        building = []
         while buf.tell() < len(raw):
             item, _ = cls.ITEM_TYPE.unpack_from(buf, None)
-            building.append(item)
-        return cls(building)
+            yield item
+
+    @classmethod
+    def unpack(cls, raw: bytes) -> Self:
+        return cls(cls._unpack_items(raw))
+
+def Sequence[T: Spec](cls: type[T]) -> type[_Sequence[T]]:
+    class SequenceType(_Sequence[T]):
+        ITEM_TYPE = cls
+    return SequenceType
 
 
-class Uint8Seq(_Sequence[Uint8]):
-    ITEM_TYPE = Uint8
-
-class Uint16Seq(_Sequence[Uint16]):
-    ITEM_TYPE = Uint16
-
-
-class _Bounded(Uint8Seq):
-    LENGTH_TYPE: Type[_Uint] = Uint16
+class _Bounded(Spec):
+    LENGTH_TYPE: type[Uint]
 
     def packed_size(self) -> int:
         return self.LENGTH_TYPE.FIXED_SIZE + super().packed_size()
@@ -177,37 +190,15 @@ class _Bounded(Uint8Seq):
             raise ValueError
         return super().unpack(force_read(src, length)), totlen
 
-class B2U8Seq(Uint8Seq):
-    LENGTH_TYPE: Type[_Uint] = Uint16
+def BoundedSeq[T: Spec](length_type: type[Uint], cls: type[T]) -> type[_Sequence[T]]:
+    class BoundedSeqType(_Bounded, _Sequence[T]):
+        LENGTH_TYPE = length_type
+        ITEM_TYPE = cls
+    return BoundedSeqType
 
-    def packed_size(self) -> int:
-        return self.LENGTH_TYPE.FIXED_SIZE + super().packed_size()
 
-    def pack(self) -> bytes:
-        raw = super().pack()
-        return self.LENGTH_TYPE(len(raw)).pack() + raw
-
-    def pack_to(self, dest: BinaryIO) -> int:
-        length = self.LENGTH_TYPE(super().packed_size())
-        a = length.pack_to(dest)
-        b = super().pack_to(dest)
-        assert a == self.LENGTH_TYPE.FIXED_SIZE and b == length
-        return a + b
-
-    @classmethod
-    def unpack(cls, raw: bytes) -> Self:
-        lenlen = cls.LENGTH_TYPE.FIXED_SIZE
-        if len(raw) < lenlen:
-            raise ValueError
-        length = cls.LENGTH_TYPE.unpack(raw[:lenlen])
-        if len(raw) != lenlen + length:
-            raise ValueError
-        return super().unpack(raw[lenlen:])
-
-    @classmethod
-    def unpack_from(cls, src: BinaryIO, limit: int|None) -> tuple[Self, int]:
-        length, lenlen = cls.LENGTH_TYPE.unpack_from(src, limit)
-        totlen = length + lenlen
-        if limit is not None and limit < totlen:
-            raise ValueError
-        return super().unpack(force_read(src, length)), totlen
+'''
+class A(Uint, IntEnum):
+    x = 3
+    y = 4
+'''
