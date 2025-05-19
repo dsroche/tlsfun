@@ -1,7 +1,10 @@
-from typing import Self, BinaryIO, get_args, Iterable, Protocol
-from dataclasses import dataclass, fields
+from typing import Self, BinaryIO, get_args, Iterable, Protocol, Any, dataclass_transform, ClassVar
+from dataclasses import dataclass
+import dataclasses
 from io import BytesIO
 from enum import IntEnum
+
+from tls_common import *
 
 type Json = int | float | str | bool | None | list[Json] | dict[str, Json]
 
@@ -102,6 +105,61 @@ class Uint32(Uint):
     FIXED_SIZE: int = 4
 
 
+class Raw(Spec, bytes):
+    def __new__(cls, *args: Any, **kwargs: Any) -> Self:
+        return bytes.__new__(cls, *args, **kwargs)
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        Spec.__init__(self)
+
+    def jsonify(self) -> Json:
+        return self.hex()
+
+    @classmethod
+    def from_json(cls, obj: Json) -> Self:
+        if isinstance(obj, str):
+            return cls(bytes.fromhex(obj))
+        raise ValueError
+
+    def packed_size(self) -> int:
+        return len(self)
+
+    def pack(self) -> bytes:
+        return self
+
+    def pack_to(self, dest: BinaryIO) -> int:
+        force_write(dest, self)
+        return len(self)
+
+    @classmethod
+    def unpack(cls, raw: bytes) -> Self:
+        return cls(raw)
+
+
+class String(Spec, str):
+    def __new__(cls, *args: Any, **kwargs: Any) -> Self:
+        return str.__new__(cls, *args, **kwargs)
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        Spec.__init__(self)
+
+    def jsonify(self) -> Json:
+        return self
+
+    @classmethod
+    def from_json(cls, obj: Json) -> Self:
+        if isinstance(obj, str):
+            return cls(obj)
+        raise ValueError
+
+    def pack(self) -> bytes:
+        return self.encode('utf8')
+
+    @classmethod
+    def unpack(cls, raw: bytes) -> Self:
+        return cls(raw.decode('utf8'))
+
+
 class _Sequence[T: Spec](Spec, tuple[T]):
     ITEM_TYPE: type[T]
 
@@ -187,6 +245,15 @@ class _Bounded(Spec):
             raise ValueError
         return super().unpack(force_read(src, length)), totlen
 
+class Raw8(_Bounded, Raw):
+    LENGTH_TYPE = Uint8
+
+class Raw16(_Bounded, Raw):
+    LENGTH_TYPE = Uint16
+
+class String8(_Bounded, String):
+    LENGTH_TYPE = Uint8
+
 def BoundedSeq[T: Spec](length_type: type[Uint], cls: type[T]) -> type[_Sequence[T]]:
     class BoundedSeqType(_Bounded, _Sequence[T]):
         LENGTH_TYPE = length_type
@@ -194,35 +261,13 @@ def BoundedSeq[T: Spec](length_type: type[Uint], cls: type[T]) -> type[_Sequence
     return BoundedSeqType
 
 
-class O:
-    SOMETHING = 4
-
-class A(O, IntEnum):
-
-    def foo(self) -> int:
-        return self.value + 7
-
-    @classmethod
-    def bar(cls) -> Self:
-        return cls(3)
-
-class W(FixedSize, IntEnum):
-    @classmethod
-    def foo(cls) -> Self:
-        return cls(7)
-
-class X(W):
-    x = 7
-    y = 9
-
-class B(A):
-    x = 3
-
-class C(A):
-    y = 4
-    x = 10
-
 class _spec_int:
+    """Decorator for IntEnum based enumerations.
+    Essentially the same as Uint, but needs to be in a decorator
+    because the order of inheritance is different.
+    (In turn, because subclasses of Enum can't have declared class fields
+    like FIXED_LENGTH.)
+    """
     def __init__(self, length: int) -> None:
         self._length = length
 
@@ -245,10 +290,151 @@ class _spec_int:
         setattr(cls, 'unpack', classmethod(unpack))
         return cls
 
+class unknown:
+    """Decorator for enums to produce a warning and a default member
+    when an unrecognized constant value is seen."""
+    def __init__(self, default: str) -> None:
+        self._default = default
+
+    def __call__[T: IntEnum](self, cls: type[T]) -> type[T]:
+        default: T = getattr(cls, self._default)
+        def missing(cls2: type[T], value: Any) -> T:
+            logger.warn(f"Unexpected value {value} for {cls2}; returning {repr(default)}")
+            return default
+        setattr(cls, '_missing_', classmethod(missing))
+        return cls
+
+
+@_spec_int(1)
+class Enum8(FixedSize, IntEnum):
+    """Base class for enumerations with 8-bit encodings."""
+
 @_spec_int(2)
-class Enum2(FixedSize, IntEnum):
+class Enum16(FixedSize, IntEnum):
+    """Base class for enumerations with 16-bit encodings."""
     pass
 
-class Thing2(Enum2):
-    x = 10
-    y = 20
+
+@dataclass(frozen=True, kw_only=True)
+class StructBase(Spec):
+    _struct_types: ClassVar[list[tuple[str, type[Spec]]]] = []
+    _struct_members: list[tuple[str, Spec]] = dataclasses.field(default_factory=list, repr=False)
+
+    def __post_init__(self) -> None:
+        for (name, typ) in self._struct_types:
+            member = getattr(self, name)
+            if isinstance(member, typ):
+                self._struct_members.append((name, member))
+            else:
+                raise ValueError(f'expected {typ}, got {repr(member)}')
+
+    def jsonify(self) -> Json:
+        return {name: member.jsonify()
+                for (name, member) in self._struct_members}
+
+    @classmethod
+    def from_json(cls, obj: Json) -> Self:
+        if not isinstance(obj, dict):
+            raise ValueError
+        building: dict[str, Spec] = {}
+        for (name, typ) in cls._struct_types:
+            building[name] = typ.from_json(obj[name])
+        # NB mypy doesn't understand dataclass constructors
+        return cls(**building) # type: ignore
+
+    def packed_size(self) -> int:
+        return sum(member.packed_size()
+                   for (_, member) in self._struct_members)
+
+    def pack(self) -> bytes:
+        return b''.join(member.pack()
+                        for (_, member) in self._struct_members)
+
+    def pack_to(self, dest: BinaryIO) -> int:
+        written = 0
+        for (_, member) in self._struct_members:
+            written += member.pack_to(dest)
+        return written
+
+    @classmethod
+    def unpack(cls, raw: bytes) -> Self:
+        kwargs: dict[str, Spec] = {}
+        buf = BytesIO(raw)
+        for (name, typ) in cls._struct_types:
+            kwargs[name], _ = typ.unpack_from(buf, None)
+        # NB mypy doesn't understand dataclass constructors
+        return cls(**kwargs) # type: ignore
+
+
+@dataclass_transform(frozen_default=True, kw_only_default=True)
+def Struct[T: StructBase](cls: type[T]) -> type[T]:
+    cls1 = dataclass(frozen=True)(cls)
+    for fld in dataclasses.fields(cls1):
+        if fld.name == '_struct_members':
+            continue
+        elif isinstance(fld.type, type) and issubclass(fld.type, Spec):
+            cls1._struct_types.append((fld.name, fld.type))
+        else:
+            raise TypeError("fields of Struct must be Spec subclasses.")
+    return cls1
+
+@Struct
+class A(StructBase):
+    x: Uint8
+    y: Raw16
+
+
+class HpkeKdfId(Enum16):
+    HKDF_SHA256 = 0x0001
+    HKDF_SHA384 = 0x0002
+    HKDF_SHA512 = 0x0003
+
+class HpkeAeadId(Enum16):
+    AES_128_GCM       = 0x0001
+    AES_256_GCM       = 0x0002
+    CHACHA20_POLY1305 = 0x0003
+
+class HpkeKemId(Enum16):
+    DHKEM_P256_HKDF_SHA256   = 0x0010
+    DHKEM_P384_HKDF_SHA384   = 0x0011
+    DHKEM_P521_HKDF_SHA512   = 0x0012
+    DHKEM_X25519_HKDF_SHA256 = 0x0020
+    DHKEM_X448_HKDF_SHA512   = 0x0021
+
+@unknown('UNSUPPORTED')
+class ECHConfigExtensionType(Enum16):
+    UNSUPPORTED = 0xffff
+
+@Struct
+class HpkeSymmetricCipherSuite(StructBase):
+    kdf_id  : HpkeKdfId
+    aead_id : HpkeAeadId
+
+@Struct
+class ECHExtension(StructBase):
+    typ  : ECHConfigExtensionType
+    data : Raw16
+
+class HpkeSymmetricCipherSuiteList(_Bounded, _Sequence[HpkeSymmetricCipherSuite]):
+    LENGTH_TYPE = Uint16
+    ITEM_TYPE = HpkeSymmetricCipherSuite
+
+@Struct
+class ECHKeyConfig(StructBase):
+    config_id     : Uint8
+    kem_id        : HpkeKemId
+    public_key    : Raw16
+    #cipher_suites : BoundedSeq(Uint16, HpkeSymmetricCipherSuite)
+    cipher_suites : HpkeSymmetricCipherSuiteList #FIXME
+
+@Struct
+class ECHConfigExtension(StructBase):
+    typ : ECHConfigExtensionStype
+    data : Raw16
+
+@Struct
+class ECHConfig24(StructBase):
+    key_config : ECHKeyConfig
+    maximum_name_length : Uint8
+    public_name : String8
+    extensions : BoundedSeq(Uint16, ECHConfigExtension)
