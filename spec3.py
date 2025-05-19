@@ -1,4 +1,4 @@
-from typing import Self, BinaryIO, get_args, Iterable
+from typing import Self, BinaryIO, get_args, Iterable, Protocol
 from dataclasses import dataclass, fields
 from io import BytesIO
 from enum import IntEnum
@@ -49,9 +49,6 @@ class Spec:
 
 class FixedSize(Spec):
     FIXED_SIZE: int
-
-    def __init__(self) -> None:
-        assert self.FIXED_SIZE >= 0
 
     def packed_size(self) -> int:
         return self.FIXED_SIZE
@@ -195,6 +192,100 @@ def BoundedSeq[T: Spec](length_type: type[Uint], cls: type[T]) -> type[_Sequence
         LENGTH_TYPE = length_type
         ITEM_TYPE = cls
     return BoundedSeqType
+
+
+class O:
+    SOMETHING = 4
+
+class A(O, IntEnum):
+
+    def foo(self) -> int:
+        return self.value + 7
+
+    @classmethod
+    def bar(cls) -> Self:
+        return cls(3)
+
+class W(FixedSize, IntEnum):
+    @classmethod
+    def foo(cls) -> Self:
+        return cls(7)
+
+class X(W):
+    x = 7
+    y = 9
+
+class B(A):
+    x = 3
+
+class C(A):
+    y = 4
+    x = 10
+
+def _spec_int[T: int](cls: type[T]) -> type[T]:
+    def jsonify(self: T) -> Json:
+        return self
+    def from_json(cls2: type[T], obj: Json) -> T:
+        if isinstance(obj, int):
+            return cls2(obj)
+        else:
+            raise ValueError
+    def unpack(cls2: type[T], raw: bytes) -> T:
+        return cls2(int.from_bytes(raw))
+    setattr(cls, 'jsonify', jsonify)
+    setattr(cls, 'from_json', classmethod(from_json))
+    setattr(cls, 'unpack', classmethod(unpack))
+    return cls
+
+class _Enum1Base(FixedSize):
+    FIXED_SIZE = 1
+
+@_spec_int
+class Enum1(_Enum1Base, IntEnum):
+    def pack(self) -> bytes:
+        return self.to_bytes(self.packed_size())
+
+
+class Thing(Enum1):
+    a = 2
+    b = 33
+
+
+'''
+class Enum1(_Enum1Base, IntEnum):
+
+
+'''
+
+
+
+class XXX(FixedSize, int):
+    def __new__(cls, value: int) -> Self:
+        return int.__new__(cls, value)
+
+    def __init__(self, value: int) -> None:
+        FixedSize.__init__(self)
+        if not (0 <= value < 2**(self.FIXED_SIZE*8)):
+            raise ValueError
+
+    def jsonify(self) -> Json:
+        return self
+
+    @classmethod
+    def from_json(cls, obj: Json) -> Self:
+        if isinstance(obj, int):
+            return cls(obj)
+        else:
+            raise ValueError
+
+    def pack(self) -> bytes:
+        return self.to_bytes(self.FIXED_SIZE)
+
+    @classmethod
+    def unpack(cls, raw: bytes) -> Self:
+        if len(raw) != cls.FIXED_SIZE:
+            raise ValueError
+        return cls(int.from_bytes(raw))
 
 
 '''
