@@ -21,8 +21,11 @@ def force_write(dest: BinaryIO, data: bytes) -> None:
         raise ValueError
     dest.flush()
 
+@dataclass(frozen=True)
+class _Has_Value[T](Protocol):
+    value: T
 
-class Spec:
+class Spec[T](_Has_Value[T]):
     def jsonify(self) -> Json:
         raise NotImplementedError
 
@@ -49,165 +52,134 @@ class Spec:
     def unpack_from(cls, src: BinaryIO, limit: int|None) -> tuple[Self, int]:
         raise NotImplementedError
 
-
-class FixedSize(Spec):
-    FIXED_SIZE: int
+@dataclass(frozen=True)
+class FixedSize[T](Spec[T]):
+    _FIXED_SIZE: ClassVar[int]
 
     def packed_size(self) -> int:
-        return self.FIXED_SIZE
+        return self._FIXED_SIZE
 
     @classmethod
     def unpack_from(cls, src: BinaryIO, limit: int|None) -> tuple[Self, int]:
-        if limit is not None and limit < cls.FIXED_SIZE:
+        if limit is not None and limit < cls._FIXED_SIZE:
             raise ValueError
-        return cls.unpack(force_read(src, cls.FIXED_SIZE)), cls.FIXED_SIZE
+        raw = force_read(src, cls._FIXED_SIZE)
+        return cls.unpack(raw), cls._FIXED_SIZE
 
-
-class Uint(FixedSize, int):
-    def __new__(cls, value: int) -> Self:
-        return int.__new__(cls, value)
-
-    def __init__(self, value: int) -> None:
-        FixedSize.__init__(self)
-        if not (0 <= value < 2**(self.FIXED_SIZE*8)):
-            raise ValueError
-
+class Primitive[T: (int | str)](Spec[T]):
     def jsonify(self) -> Json:
-        return self
+        return self.value
 
     @classmethod
     def from_json(cls, obj: Json) -> Self:
-        if isinstance(obj, int):
-            return cls(obj)
-        else:
+        try:
+            return cls(value=obj) # type: ignore
+        except (ValueError, TypeError):
+            raise ValueError from None
+
+class Uint(Primitive[int], FixedSize[int]):
+    def __post_init__(self) -> None:
+        if not (0 <= self.value < 2**(self._FIXED_SIZE * 8)):
             raise ValueError
 
     def pack(self) -> bytes:
-        return self.to_bytes(self.FIXED_SIZE)
+        return self.value.to_bytes(self._FIXED_SIZE)
 
     @classmethod
     def unpack(cls, raw: bytes) -> Self:
-        if len(raw) != cls.FIXED_SIZE:
+        if len(raw) != cls._FIXED_SIZE:
             raise ValueError
-        return cls(int.from_bytes(raw))
+        return cls(value=int.from_bytes(raw))
 
-
+@dataclass(frozen=True)
 class Uint8(Uint):
-    FIXED_SIZE: int = 1
+    _FIXED_SIZE: ClassVar[int] = 1
 
+@dataclass(frozen=True)
 class Uint16(Uint):
-    FIXED_SIZE: int = 2
+    _FIXED_SIZE: ClassVar[int] = 2
 
-class Uint24(Uint):
-    FIXED_SIZE: int = 3
-
-class Uint32(Uint):
-    FIXED_SIZE: int = 4
-
-
-class Raw(Spec, bytes):
-    def __new__(cls, *args: Any, **kwargs: Any) -> Self:
-        return bytes.__new__(cls, *args, **kwargs)
-
-    def __init__(self, *args: Any, **kwargs: Any) -> None:
-        Spec.__init__(self)
+@dataclass(frozen=True)
+class Raw(Spec[bytes]):
+    value: bytes
 
     def jsonify(self) -> Json:
-        return self.hex()
+        return self.value.hex()
 
     @classmethod
     def from_json(cls, obj: Json) -> Self:
         if isinstance(obj, str):
-            return cls(bytes.fromhex(obj))
+            return cls(value=bytes.fromhex(obj))
         raise ValueError
 
     def packed_size(self) -> int:
-        return len(self)
+        return len(self.value)
 
     def pack(self) -> bytes:
-        return self
+        return self.value
 
     def pack_to(self, dest: BinaryIO) -> int:
-        force_write(dest, self)
-        return len(self)
+        force_write(dest, self.value)
+        return len(self.value)
 
     @classmethod
     def unpack(cls, raw: bytes) -> Self:
-        return cls(raw)
+        return cls(value=raw)
 
-
-class String(Spec, str):
-    def __new__(cls, *args: Any, **kwargs: Any) -> Self:
-        return str.__new__(cls, *args, **kwargs)
-
-    def __init__(self, *args: Any, **kwargs: Any) -> None:
-        Spec.__init__(self)
-
-    def jsonify(self) -> Json:
-        return self
-
-    @classmethod
-    def from_json(cls, obj: Json) -> Self:
-        if isinstance(obj, str):
-            return cls(obj)
-        raise ValueError
+@dataclass(frozen=True)
+class String(Primitive[str]):
+    value: str
 
     def pack(self) -> bytes:
-        return self.encode('utf8')
+        return self.value.encode('utf8')
 
     @classmethod
     def unpack(cls, raw: bytes) -> Self:
         return cls(raw.decode('utf8'))
 
+def Sequence[T: Spec[Any]](item_cls: type[T]) -> type[Spec[tuple[T,...]]]:
+    @dataclass(frozen=True)
+    class SequenceType(Spec[tuple[T,...]]):
+        value: tuple[T,...]
 
-class _Sequence[T: Spec](Spec, tuple[T]):
-    ITEM_TYPE: type[T]
+        def jsonify(self) -> Json:
+            return list(item.jsonify() for item in self.value)
 
-    def __new__(cls, values: Iterable[T]) -> Self:
-        return tuple.__new__(cls, values)
-
-    def __init__(self, values: Iterable[T]) -> None:
-        Spec.__init__(self)
-        for x in self:
-            if not isinstance(x, self.ITEM_TYPE):
-                raise ValueError
-
-    def jsonify(self) -> Json:
-        return [x.jsonify() for x in self]
-
-    @classmethod
-    def from_json(cls, obj: Json) -> Self:
-        if isinstance(obj, (list, tuple)):
-            return cls(cls.ITEM_TYPE.from_json(x) for x in obj)
-        else:
+        @classmethod
+        def from_json(cls, obj: Json) -> Self:
+            if isinstance(obj, list):
+                return cls(value=tuple(item_cls.from_json(item)
+                                       for item in obj))
             raise ValueError
 
-    def packed_size(self) -> int:
-        return sum(x.packed_size() for x in self)
+        def packed_size(self) -> int:
+            return sum(item.packed_size() for item in self.value)
 
-    def pack(self) -> bytes:
-        return b''.join(x.pack() for x in self)
+        def pack(self) -> bytes:
+            return b''.join(item.pack() for item in self.value)
 
-    def pack_to(self, dest: BinaryIO) -> int:
-        raw = self.pack()
-        force_write(dest, raw)
-        return len(raw)
+        def pack_to(self, dest: BinaryIO) -> int:
+            return sum(item.pack_to(dest) for item in self.value)
 
-    @classmethod
-    def _unpack_items(cls, raw: bytes) -> Iterable[T]:
-        buf = BytesIO(raw)
-        while buf.tell() < len(raw):
-            item, _ = cls.ITEM_TYPE.unpack_from(buf, None)
-            yield item
+        @classmethod
+        def _unpack_items(cls, raw: bytes) -> Iterable[T]:
+            src = BytesIO(raw)
+            remain = len(raw)
+            while remain > 0:
+                item, got = item_cls.unpack_from(src, remain)
+                yield item
+                remain -= got
 
-    @classmethod
-    def unpack(cls, raw: bytes) -> Self:
-        return cls(cls._unpack_items(raw))
+        @classmethod
+        def unpack(cls, raw: bytes) -> Self:
+            return cls(value=tuple(cls._unpack_items(raw)))
 
-def Sequence[T: Spec](cls: type[T]) -> type[_Sequence[T]]:
-    class SequenceType(_Sequence[T]):
-        ITEM_TYPE = cls
+    SequenceType.__name__ = f'Sequence({item_cls.__name__})' #TODO fix repr stuff
     return SequenceType
+
+
+'''
+
 
 class BS[T: Spec]:
     def __init__(self, lcls: type[Uint], tcls: type[T]) -> None:
@@ -473,3 +445,4 @@ class A(StructBase):
 
 #a = A.from_json({'x': 3, 'y': 'hello'})
 ################XXX
+'''
