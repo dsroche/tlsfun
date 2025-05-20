@@ -93,11 +93,11 @@ class Uint(Primitive[int], FixedSize[int]):
 
 @dataclass(frozen=True)
 class Uint8(Uint):
-    _FIXED_SIZE: ClassVar[int] = 1
+    _FIXED_SIZE = 1
 
 @dataclass(frozen=True)
 class Uint16(Uint):
-    _FIXED_SIZE: ClassVar[int] = 2
+    _FIXED_SIZE = 2
 
 @dataclass(frozen=True)
 class Raw(Spec[bytes]):
@@ -177,56 +177,67 @@ def Sequence[T: Spec[Any]](item_cls: type[T]) -> type[Spec[tuple[T,...]]]:
     SequenceType.__name__ = f'Sequence({item_cls.__name__})' #TODO fix repr stuff
     return SequenceType
 
+def Bounded[T: Spec[Any]](length_cls: type[Uint], inner_cls: type[T]) -> type[Spec[T]]:
+    lenlen = length_cls._FIXED_SIZE
+
+    @dataclass(frozen=True)
+    class BoundedType(Spec[T]):
+        value: T
+
+        def jsonify(self) -> Json:
+            return self.value.jsonify()
+
+        @classmethod
+        def from_json(cls, obj: Json) -> Self:
+            return cls(inner_cls.from_json(obj))
+
+        def packed_size(self) -> int:
+            return lenlen + self.value.packed_size()
+
+        def pack(self) -> bytes:
+            raw = self.value.pack()
+            return length_cls(len(raw)).pack() + raw
+
+        def pack_to(self, dest: BinaryIO) -> int:
+            return (length_cls(self.value.packed_size()).pack_to(dest)
+                    + self.value.pack_to(dest))
+
+        @classmethod
+        def unpack(cls, raw: bytes) -> Self:
+            if len(raw) < lenlen:
+                raise ValueError
+            length = length_cls.unpack(raw[:lenlen]).value
+            if len(raw) != lenlen + length:
+                raise ValueError
+            return cls(inner_cls.unpack(raw[lenlen:]))
+
+        @classmethod
+        def unpack_from(cls, src: BinaryIO, limit: int|None) -> tuple[Self, int]:
+            len_obj, got1 = length_cls.unpack_from(src, limit)
+            length = len_obj.value
+            if limit is not None and limit < got1 + length:
+                raise ValueError
+            raw = force_read(src, length)
+            return cls(inner_cls.unpack(raw)), got1 + length
+
+    return BoundedType
+
+Raw8 = Bounded(Uint8, Raw)
+Raw16 = Bounded(Uint16, Raw)
+
+def Seq8[T: Spec[Any]](inner_cls: type[T]) -> type[Spec[Spec[tuple[T,...]]]]:
+    return Bounded(Uint8, Sequence(inner_cls))
+def Seq16[T: Spec[Any]](inner_cls: type[T]) -> type[Spec[Spec[tuple[T,...]]]]:
+    return Bounded(Uint16, Sequence(inner_cls))
+
+''' TODO
+
+
 
 '''
 
+'''
 
-class BS[T: Spec]:
-    def __init__(self, lcls: type[Uint], tcls: type[T]) -> None:
-        self._lcls = lcls
-        self._tcls = tcls
-
-    def __call__[U](self, cls: type[U]) -> type[_Sequence[T]]:
-        class SequenceType(_Bounded, _Sequence[T]):
-            LENGTH_TYPE = self._lcls
-            ITEM_TYPE = self._tcls
-        return SequenceType
-
-
-class _Bounded(Spec):
-    LENGTH_TYPE: type[Uint]
-
-    def packed_size(self) -> int:
-        return self.LENGTH_TYPE.FIXED_SIZE + super().packed_size()
-
-    def pack(self) -> bytes:
-        raw = super().pack()
-        return self.LENGTH_TYPE(len(raw)).pack() + raw
-
-    def pack_to(self, dest: BinaryIO) -> int:
-        length = self.LENGTH_TYPE(super().packed_size())
-        a = length.pack_to(dest)
-        b = super().pack_to(dest)
-        assert a == self.LENGTH_TYPE.FIXED_SIZE and b == length
-        return a + b
-
-    @classmethod
-    def unpack(cls, raw: bytes) -> Self:
-        lenlen = cls.LENGTH_TYPE.FIXED_SIZE
-        if len(raw) < lenlen:
-            raise ValueError
-        length = cls.LENGTH_TYPE.unpack(raw[:lenlen])
-        if len(raw) != lenlen + length:
-            raise ValueError
-        return super().unpack(raw[lenlen:])
-
-    @classmethod
-    def unpack_from(cls, src: BinaryIO, limit: int|None) -> tuple[Self, int]:
-        length, lenlen = cls.LENGTH_TYPE.unpack_from(src, limit)
-        totlen = length + lenlen
-        if limit is not None and limit < totlen:
-            raise ValueError
-        return super().unpack(force_read(src, length)), totlen
 
 class Raw8(_Bounded, Raw):
     LENGTH_TYPE = Uint8
