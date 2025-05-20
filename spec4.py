@@ -49,7 +49,7 @@ class Spec[T](_Has_Value[T]):
         raise NotImplementedError
 
     @classmethod
-    def unpack_from(cls, src: BinaryIO, limit: int|None) -> tuple[Self, int]:
+    def unpack_from(cls, src: BinaryIO, limit: int|None = None) -> tuple[Self, int]:
         raise NotImplementedError
 
 @dataclass(frozen=True)
@@ -60,7 +60,7 @@ class FixedSize[T](Spec[T]):
         return self._FIXED_SIZE
 
     @classmethod
-    def unpack_from(cls, src: BinaryIO, limit: int|None) -> tuple[Self, int]:
+    def unpack_from(cls, src: BinaryIO, limit: int|None = None) -> tuple[Self, int]:
         if limit is not None and limit < cls._FIXED_SIZE:
             raise ValueError
         raw = force_read(src, cls._FIXED_SIZE)
@@ -177,30 +177,35 @@ def Sequence[T: Spec[Any]](item_cls: type[T]) -> type[Spec[tuple[T,...]]]:
     SequenceType.__name__ = f'Sequence({item_cls.__name__})' #TODO fix repr stuff
     return SequenceType
 
-def Bounded[T: Spec[Any]](length_cls: type[Uint], inner_cls: type[T]) -> type[Spec[T]]:
+def Bounded[T](length_cls: type[Uint], inner_cls: type[Spec[T]]) -> type[Spec[T]]:
     lenlen = length_cls._FIXED_SIZE
 
     @dataclass(frozen=True)
     class BoundedType(Spec[T]):
-        value: T
+        def _inner(self) -> Spec[T]:
+            return inner_cls(value = self.value)
+
+        @classmethod
+        def _outer(cls, item: Spec[T]) -> Self:
+            return cls(value = item.value)
 
         def jsonify(self) -> Json:
-            return self.value.jsonify()
+            return self._inner().jsonify()
 
         @classmethod
         def from_json(cls, obj: Json) -> Self:
-            return cls(inner_cls.from_json(obj))
+            return cls._outer(inner_cls.from_json(obj))
 
         def packed_size(self) -> int:
-            return lenlen + self.value.packed_size()
+            return lenlen + self._inner().packed_size()
 
         def pack(self) -> bytes:
-            raw = self.value.pack()
+            raw = self._inner().pack()
             return length_cls(len(raw)).pack() + raw
 
         def pack_to(self, dest: BinaryIO) -> int:
-            return (length_cls(self.value.packed_size()).pack_to(dest)
-                    + self.value.pack_to(dest))
+            return (length_cls(self._inner().packed_size()).pack_to(dest)
+                    + self._inner().pack_to(dest))
 
         @classmethod
         def unpack(cls, raw: bytes) -> Self:
@@ -209,26 +214,77 @@ def Bounded[T: Spec[Any]](length_cls: type[Uint], inner_cls: type[T]) -> type[Sp
             length = length_cls.unpack(raw[:lenlen]).value
             if len(raw) != lenlen + length:
                 raise ValueError
-            return cls(inner_cls.unpack(raw[lenlen:]))
+            return cls._outer(inner_cls.unpack(raw[lenlen:]))
 
         @classmethod
-        def unpack_from(cls, src: BinaryIO, limit: int|None) -> tuple[Self, int]:
+        def unpack_from(cls, src: BinaryIO, limit: int|None = None) -> tuple[Self, int]:
             len_obj, got1 = length_cls.unpack_from(src, limit)
             length = len_obj.value
             if limit is not None and limit < got1 + length:
                 raise ValueError
             raw = force_read(src, length)
-            return cls(inner_cls.unpack(raw)), got1 + length
+            return cls._outer(inner_cls.unpack(raw)), got1 + length
 
     return BoundedType
 
 Raw8 = Bounded(Uint8, Raw)
 Raw16 = Bounded(Uint16, Raw)
+String8 = Bounded(Uint8, String)
+String16 = Bounded(Uint16, String)
 
-def Seq8[T: Spec[Any]](inner_cls: type[T]) -> type[Spec[Spec[tuple[T,...]]]]:
+''' FIXME
+def Seq8[T](inner_cls: type[T]) -> type[Spec[tuple[T,...]]]:
     return Bounded(Uint8, Sequence(inner_cls))
-def Seq16[T: Spec[Any]](inner_cls: type[T]) -> type[Spec[Spec[tuple[T,...]]]]:
+def Seq16[T](inner_cls: type[T]) -> type[Spec[tuple[T,...]]]:
     return Bounded(Uint16, Sequence(inner_cls))
+'''
+
+def Seq16[T](inner_cls: type[T]) -> type[Spec[tuple[T,...]]]:
+    return Bounded(Uint16, Sequence(inner_cls)) # type: ignore
+
+def all_tests() -> None:
+    #A = Bounded(Uint16, Sequence(Uint8))
+    A = Seq16(Uint8)
+    test_spec(A, (Uint8(10), Uint8(20)), [10,20], '00020a14')
+    test_spec(Uint8, 33, 33, '21')
+    test_spec(Uint16, 50, 50, '0032')
+    test_spec(Raw8, b'abc', '616263', '03616263')
+    test_spec(Raw16, b'', '', '0000')
+    test_spec(String8, 'abcd', 'abcd', '0461626364')
+    test_spec(String16, 'bb', 'bb', '00026262')
+
+def check[T](a: T, b: T) -> None:
+    if isinstance(a, bytes) and isinstance(b, bytes):
+        check(a.hex(), b.hex())
+    elif a != b:
+        raise AssertionError(f'got {a} expected {b}')
+
+def test_spec[T](
+    cls: type[Spec[T]],
+    orig: T,
+    js: Json,
+    rawhex: str,
+    streaming: bool = True,
+) -> None:
+    raw = bytes.fromhex(rawhex)
+    a = cls(value=orig)
+    check(a.jsonify(), js)
+    check(cls.from_json(js).jsonify(), js)
+    check(a.pack(), raw)
+    check(a.unpack(raw).pack(), raw)
+    check(a.packed_size(), len(raw))
+    if streaming:
+        buf = BytesIO()
+        a.pack_to(buf)
+        check(buf.getvalue(), raw)
+        buf.seek(0)
+        item, count = cls.unpack_from(buf)
+        check(count, len(raw))
+        check(item.jsonify(), js)
+
+if __name__ == '__main__':
+    all_tests()
+    print('all tests passed')
 
 ''' TODO
 
