@@ -181,37 +181,57 @@ class _Sequence[T: FullSpec](Spec, tuple[T,...]):
 
 @dataclass(frozen=True)
 class _StructBase(FullSpec):
-    @override
+    _member_names: ClassVar[tuple[str,...]]
+    _member_types: ClassVar[tuple[type[FullSpec],...]]
+    _member_values: tuple[FullSpec,...] = field(init=False, repr=False, hash=False, compare=False)
+
     def __post_init__(self) -> None:
-        # TODO HERE
-        pass
+        accum: list[FullSpec] = []
+        for (name, typ) in zip(self._member_names, self._member_types):
+            obj = getattr(self, name)
+            if isinstance(obj, typ):
+                accum.append(obj)
+            else:
+                raise ValueError
+        super().__setattr__('_member_values', tuple(accum))
 
     def jsonify(self) -> Json:
-        raise NotImplementedError
+        return {name: value.jsonify()
+                for (name,value) in zip(self._member_names, self._member_values)}
 
     @classmethod
     def from_json(cls, obj: Json) -> Self:
-        raise NotImplementedError
+        if isinstance(obj, dict):
+            accum = {name: typ.from_json(obj[name])
+                     for (name,typ) in zip(cls._member_names, cls._member_types)}
+            return cls(**accum)
+        raise ValueError
 
     def packed_size(self) -> int:
-        return len(self.pack())
+        return sum(value.packed_size() for value in self._member_values)
 
     def pack(self) -> bytes:
-        raise NotImplementedError
+        return b''.join(value.pack() for value in self._member_values)
 
     def pack_to(self, dest: BinaryIO) -> int:
-        raw = self.pack()
-        force_write(dest, raw)
-        return len(raw)
+        return sum(value.pack_to(dest) for value in self._member_values)
 
     @classmethod
     def unpack(cls, raw: bytes) -> Self:
-        raise NotImplementedError
+        buf = BytesIO(raw)
+        instance, got = cls.unpack_from(buf, len(raw))
+        if got != len(raw):
+            raise ValueError
+        return instance
 
-class FullSpec(Spec):
     @classmethod
     def unpack_from(cls, src: BinaryIO, limit: int|None = None) -> tuple[Self, int]:
-        raise NotImplementedError
+        consumed = 0
+        accum = {}
+        for (name, typ) in zip(cls._member_names, cls._member_types):
+            accum[name], got = typ.unpack_from(src, None if limit is None else (limit - consumed))
+            consumed += got
+        return cls(**accum), consumed
 
 
 '''

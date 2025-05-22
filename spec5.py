@@ -174,21 +174,27 @@ class EnumSpec(GenSpec):
     def prereqs(self) -> Iterable[GenSpec]:
         yield self._parent
 
-type _Nested = GenSpec | type[Spec]
+type _Nested = GenSpec | type[Spec] | str
 
 def nested_name_hint(typ: _Nested) -> str:
-    if isinstance(typ, GenSpec):
-        hint = typ._name_hint()
-        return type(typ).__name__ if hint is None else hint
-    else:
-        return typ.__name__
+    match typ:
+        case GenSpec():
+            hint = typ._name_hint()
+            return type(typ).__name__ if hint is None else hint
+        case type():
+            return typ.__name__
+        case str():
+            return typ
 
 def nested_name(typ: _Nested) -> str:
-    if isinstance(typ, GenSpec):
-        assert typ._name is not None
-        return str(typ._name)
-    else:
-        return f'{typ.__module__}.{typ.__name__}'
+    match typ:
+        case GenSpec():
+            assert typ._name is not None
+            return str(typ._name)
+        case type():
+            return f'{typ.__module__}.{typ.__name__}'
+        case str():
+            return typ
 
 
 @flyweight
@@ -274,19 +280,47 @@ class Bounded(GenSpec):
 @flyweight
 @dataclass(unsafe_hash=True)
 class Sequence(GenSpec):
-    item_tyupe: _Nested
+    item_type: _Nested
 
     @override
     def _name_hint(self) -> str:
-        return f'{nested_name_hint(self.item_tyupe)}Seq'
+        return f'{nested_name_hint(self.item_type)}Seq'
 
     @override
     def generate(self, dest: TextIO) -> None:
-        nn = nested_name(self.item_tyupe)
+        nn = nested_name(self.item_type)
         dest.write(dedent(f"""\
             class {self._name}(spec_static._Sequence[{nn}]):
                 _ITEM_TYPE = {nn}
             """))
+
+@dataclass
+class _Struct(GenSpec):
+    schema: tuple[tuple[str, _Nested], ...]
+
+    @override
+    def _name_hint(self) -> str:
+        return 'Struct'
+
+    @override
+    def generate(self, dest: TextIO) -> None:
+        dest.write(dedent(f"""\
+            @dataclass(frozen=True)
+            class {self._name}(spec_static._StructBase):
+                _member_names: ClassVar[tuple[str,...]] = ({','.join(repr(name) for (name,_) in self.schema)},)
+                _member_types: ClassVar[tuple[type[FullSpec],...]] = ({','.join(nested_name(typ) for _,typ in self.schema)},)
+            """))
+        for name,typ in self.schema:
+            dest.write(f'    {name}: {nested_name(typ)}\n')
+
+    @override
+    def prereqs(self) -> Iterable[GenSpec]:
+        for _,typ in self.schema:
+            if isinstance(typ, GenSpec):
+                yield typ
+
+def Struct(**kwargs: _Nested) -> _Struct:
+    return _Struct(tuple(kwargs.items()))
 
 @flyweight
 @dataclass
@@ -321,8 +355,10 @@ def generate_specs(dest: TextIO, **kwargs: GenSpec) -> None:
 
     dest.write(dedent('''\
         # XXX AUTO-GENERATED - DO NOT EDIT! XXX
-        from typing import Self, override, BinaryIO
+        from typing import Self, override, BinaryIO, ClassVar
         import enum
+        import dataclasses
+        from dataclasses import dataclass
         import spec_static
         from spec_static import *
         '''))

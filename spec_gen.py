@@ -23,6 +23,17 @@ def write_to(fname: str) -> None:
             String16 = Bounded(16, String),
             Shorts = Sequence(Uint(16)),
             ShortShorts = Bounded(8, Sequence(Uint(16))),
+            A = Bounded(16, Sequence(Uint(8))),
+            Person = Struct(
+                name = 'String16',
+                phone = Uint(16),
+            ),
+            Animal = Struct(
+                name = Bounded(8, String),
+                legs = Uint(8),
+                nums = Bounded(8, Sequence(Uint(16))),
+            ),
+
         )
     print('specs written to', fname)
 
