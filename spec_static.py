@@ -233,6 +233,170 @@ class _StructBase(FullSpec):
             consumed += got
         return cls(**accum), consumed
 
+class _SpecEnum(_Fixed, IntEnum):
+    pass
+
+class _Const[T: Spec](FullSpec):
+    VALUE: T
+
+    def jsonify(self) -> Json:
+        return self.VALUE.jsonify()
+
+    @classmethod
+    def from_json(cls, obj: Json) -> Self:
+        if obj != cls.VALUE.jsonify():
+            raise ValueError
+        return cls()
+
+    def packed_size(self) -> int:
+        return self.VALUE.packed_size()
+
+    def pack(self) -> bytes:
+        return self.VALUE.pack()
+
+    def pack_to(self, dest: BinaryIO) -> int:
+        return self.VALUE.pack_to(dest)
+
+    @classmethod
+    def unpack(cls, raw: bytes) -> Self:
+        if raw != cls.VALUE.pack():
+            raise ValueError
+        return cls()
+
+    @classmethod
+    def unpack_from(cls, src: BinaryIO, limit: int|None = None) -> tuple[Self, int]:
+        raw = cls.VALUE.pack()
+        if limit is not None and limit < len(raw):
+            raise ValueError
+        if force_read(src, len(raw)) != raw:
+            raise ValueError
+        return cls(), len(raw)
+
+class _Selectee[S: _SpecEnum, T: FullSpec](FullSpec):
+    _SELECTOR: S
+    _DATA_TYPE: type[T]
+
+    def __init__(self, data: T) -> None:
+        self._data: T = data
+
+    @property
+    def typ(self) -> S:
+        return self._SELECTOR
+
+    @property
+    def data(self) -> T:
+        return self._data
+
+    @override
+    def jsonify(self) -> Json:
+        return {'typ': self.typ.jsonify(), 'data': self.data.jsonify()}
+
+    @override
+    @classmethod
+    def from_json(cls, obj: Json) -> Self:
+        match obj:
+            case {'typ': typ, 'data': data, **rest}:
+                if rest:
+                    raise ValueError
+                if cls._SELECTOR.from_json(typ) != cls._SELECTOR:
+                    raise ValueError
+                return cls(cls._DATA_TYPE.from_json(data))
+        raise ValueError
+
+    @override
+    def packed_size(self) -> int:
+        return self.typ.packed_size() + self.data.packed_size()
+
+    @override
+    def pack(self) -> bytes:
+        return self.typ.pack() + self.data.pack()
+
+    @override
+    def pack_to(self, dest: BinaryIO) -> int:
+        return self.typ.pack_to(dest) + self.data.pack_to(dest)
+
+    @override
+    @classmethod
+    def unpack(cls, raw: bytes) -> Self:
+        tlen = cls._SELECTOR._BYTE_LENGTH
+        if len(raw) < tlen:
+            raise ValueError
+        cls._SELECTOR.unpack(raw[:tlen])
+        return cls(cls._DATA_TYPE.unpack(raw[tlen:]))
+
+    @override
+    @classmethod
+    def unpack_from(cls, src: BinaryIO, limit: int|None = None) -> tuple[Self, int]:
+        _, tlen = cls._SELECTOR.unpack_from(src, limit)
+        return cls.unpack_from_data(src, (None if limit is None else limit-tlen))
+
+    @classmethod
+    def unpack_from_data(cls, src: BinaryIO, limit: int|None = None) -> tuple[Self, int]:
+        data, dlen = cls._DATA_TYPE.unpack_from(src, limit)
+        return cls(data), cls._SELECTOR._BYTE_LENGTH + dlen
+
+class _Select[S: _SpecEnum](FullSpec):
+    _SELECT_TYPE: type[S]
+    _SELECTEES: dict[S, type[_Selectee[S,FullSpec]]]
+
+    def __init__(self, value: _Selectee[S,FullSpec]) -> None:
+        self._value: _Selectee[S,FullSpec] = value
+
+    @property
+    def typ(self) -> S:
+        return self._value.typ
+
+    @property
+    def data(self) -> FullSpec:
+        return self._value.data
+
+    def jsonify(self) -> Json:
+        return self._value.jsonify()
+
+    @classmethod
+    def from_json(cls, obj: Json) -> Self:
+        match obj:
+            case {'typ': typ}:
+                selector = cls._SELECT_TYPE.from_json(typ)
+                try:
+                    value_cls = cls._SELECTEES[selector]
+                except KeyError:
+                    raise ValueError
+                return cls(value_cls.from_json(obj))
+        raise ValueError
+
+    def packed_size(self) -> int:
+        return self._value.packed_size()
+
+    def pack(self) -> bytes:
+        return self._value.pack()
+
+    def pack_to(self, dest: BinaryIO) -> int:
+        return self._value.pack_to(dest)
+
+    @classmethod
+    def unpack(cls, raw: bytes) -> Self:
+        slen = cls._SELECT_TYPE._BYTE_LENGTH
+        if len(raw) < slen:
+            raise ValueError
+        selector = cls._SELECT_TYPE.unpack(raw[:slen])
+        try:
+            value_cls = cls._SELECTEES[selector]
+        except KeyError:
+            raise ValueError
+        return cls(value_cls.unpack(raw))
+
+    @classmethod
+    def unpack_from(cls, src: BinaryIO, limit: int|None = None) -> tuple[Self, int]:
+        selector, slen = cls._SELECT_TYPE.unpack_from(src, limit)
+        try:
+            value_cls = cls._SELECTEES[selector]
+        except KeyError:
+            raise ValueError
+        value, got = value_cls.unpack_from_data(src, (None if limit is None else limit-slen))
+        return cls(value), got
+
+
 
 '''
 class Spec:

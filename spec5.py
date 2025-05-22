@@ -4,7 +4,7 @@ import dataclasses
 from io import BytesIO
 from enum import IntEnum
 import functools
-from textwrap import dedent
+from textwrap import indent, dedent
 import spec_static
 from spec_static import *
 
@@ -130,14 +130,16 @@ class _SpecEnumX(GenSpec):
     @override
     def generate(self, dest: TextIO) -> None:
         dest.write(dedent(f"""\
-            class {self._name}({self._parent._name}, enum.IntEnum):
+            class {self._name}({self._parent._name}, spec_static._SpecEnum):
                 def jsonify(self) -> Json:
-                    return self
+                    return self.name
 
                 @classmethod
                 def from_json(cls, obj: Json) -> Self:
                     if isinstance(obj, int):
                         return cls(obj)
+                    elif isinstance(obj, str):
+                        return cls[obj]
                     else:
                         raise ValueError
 
@@ -321,6 +323,85 @@ class _Struct(GenSpec):
 
 def Struct(**kwargs: _Nested) -> _Struct:
     return _Struct(tuple(kwargs.items()))
+
+@dataclass
+class _SelecteeGen(GenSpec):
+    parent: GenSpec
+    select_type: _Nested
+    selection: str
+    data_type: _Nested
+
+    @override
+    def _name_hint(self) -> str:
+        pname = self.parent._name_hint() if self.parent._name is None else self.parent._name
+        return f'{pname}{self.selection}'
+
+    @override
+    def generate(self, dest: TextIO) -> None:
+        sname = nested_name(self.select_type)
+        dname = nested_name(self.data_type)
+        dest.write(dedent(f"""\
+            class {self._name}(spec_static._Selectee[{sname}, {dname}]):
+                _SELECTOR = {sname}.{self.selection}
+                _DATA_TYPE = {dname}
+            """))
+
+    @override
+    def prereqs(self) -> Iterable[GenSpec]:
+        if isinstance(self.select_type, GenSpec):
+            yield self.select_type
+        if isinstance(self.data_type, GenSpec):
+            yield self.data_type
+
+class Select(GenSpec):
+    def __init__(self, select_type: _Nested, **kwargs: _Nested) -> None:
+        self._select_type: _Nested = select_type
+        self._selectees: dict[str, _SelecteeGen] = {
+            key: _SelecteeGen(self, select_type, key, value)
+            for (key,value) in kwargs.items()}
+
+    @override
+    def _name_hint(self) -> str:
+        match self._select_type:
+            case GenSpec(_name=str(name)):
+                pass
+            case GenSpec():
+                name = 'Selector'
+            case str(name):
+                pass
+            case type(__name__=name):
+                pass
+        if name.endswith('Type'):
+            return name[:-4]
+        else:
+            return f'{name}Obj'
+
+    @override
+    def generate(self, dest: TextIO) -> None:
+        sname = nested_name(self._select_type)
+        tname = f'{self._name}Variants'
+        dest.write(dedent(f"""\
+            type {tname} = {' | '.join(str(s._name) for s in self._selectees.values())}
+
+            class {self._name}(spec_static._Select[{sname}]):
+                _SELECT_TYPE = {sname}
+                _SELECTEES = {{
+            """))
+        for key, s in self._selectees.items():
+            dest.write(f"        {sname}.{key}: {s._name},\n")
+        dest.write("    }\n")
+        dest.write(indent("    ", dedent(f"""\
+                def __init__(self, value: {tname}) -> None:
+                    super().__init__(value)
+                    self._value: {tname} = value
+                @property
+                def value(self) -> {tname}:
+                    return self._value
+            """)))
+
+    @override
+    def prereqs(self) -> Iterable[GenSpec]:
+        return self._selectees.values()
 
 @flyweight
 @dataclass

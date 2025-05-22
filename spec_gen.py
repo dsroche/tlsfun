@@ -23,7 +23,7 @@ def write_to(fname: str) -> None:
             String16 = Bounded(16, String),
             Shorts = Sequence(Uint(16)),
             ShortShorts = Bounded(8, Sequence(Uint(16))),
-            A = Bounded(16, Sequence(Uint(8))),
+            B16S8 = Bounded(16, Sequence(Uint(8))),
             Person = Struct(
                 name = 'String16',
                 phone = Uint(16),
@@ -33,7 +33,20 @@ def write_to(fname: str) -> None:
                 legs = Uint(8),
                 nums = Bounded(8, Sequence(Uint(16))),
             ),
-
+            InstrumentType = EnumSpec(
+                8,
+                Brass = 1,
+                Woodwind = 2,
+                Strings = 3,
+            ),
+            Instrument = Select(
+                'InstrumentType',
+                Brass = Struct(
+                    valves = 'Uint8',
+                    weight = 'Uint16',
+                ),
+                Woodwind = Bounded(8, String),
+            ),
         )
     print('specs written to', fname)
 
