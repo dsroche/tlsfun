@@ -5,6 +5,8 @@ from io import BytesIO
 from enum import IntEnum
 import functools
 from textwrap import dedent
+import spec_static
+from spec_static import *
 
 @dataclass(frozen=True)
 class _Name:
@@ -18,9 +20,9 @@ class _Name:
         else:
             return f"{self._stub}_{self._index}"
 
-@dataclass(init=False, repr=False, eq=False, match_args=False)
+@dataclass(init=False, repr=False, eq=False, match_args=False, unsafe_hash=True)
 class GenSpec:
-    _name: _Name|None = field(default=None, init=False)
+    _name: _Name|None = field(default=None, init=False, hash=False)
 
     def _name_hint(self) -> str|None:
         return None
@@ -28,7 +30,7 @@ class GenSpec:
     def generate(self, dest: TextIO) -> None:
         raise NotImplementedError
 
-    def prereqs(self) -> Iterable[Self]:
+    def prereqs(self) -> Iterable['GenSpec']:
         return ()
 
 class _Names:
@@ -36,18 +38,18 @@ class _Names:
         self._used: dict[str, int] = {}
 
     def assign_name(self, gs: GenSpec, suggestion: str|None = None) -> None:
-        assert gs._name is None
-        stub = suggestion
-        if stub is None:
-            stub = gs._name_hint()
+        if gs._name is None:
+            stub = suggestion
             if stub is None:
-                stub = 'Spec'
-        try:
-            index = self._used[stub]
-        except KeyError:
-            index = 0
-        self._used[stub] = index + 1
-        gs._name = _Name(self._used, stub, index)
+                stub = gs._name_hint()
+                if stub is None:
+                    stub = 'Spec'
+            try:
+                index = self._used[stub]
+            except KeyError:
+                index = 0
+            self._used[stub] = index + 1
+            gs._name = _Name(self._used, stub, index)
 
 def flyweight[T](cls: type[T]) -> type[T]:
     """Decorator to create only one instance of the class with the same init() arguments."""
@@ -79,7 +81,7 @@ def flyweight[T](cls: type[T]) -> type[T]:
     return cls
 
 @flyweight
-@dataclass
+@dataclass(unsafe_hash=True)
 class Uint(GenSpec):
     bit_length: int
 
@@ -92,7 +94,7 @@ class Uint(GenSpec):
     def generate(self, dest: TextIO) -> None:
         assert self._name is not None
         dest.write(dedent(f"""\
-            class {self._name}(spec_static.Integral):
+            class {self._name}(spec_static._Integral):
                 _BYTE_LENGTH = {self.bit_length // 8}
             """))
 
@@ -119,7 +121,7 @@ class _SpecEnumX(GenSpec):
     bit_length: int
 
     def __post_init__(self) -> None:
-        self._parent = _FixedX(self.bit_length)
+        self._parent: _FixedX = _FixedX(self.bit_length)
 
     @override
     def _name_hint(self) -> str:
@@ -170,7 +172,135 @@ class EnumSpec(GenSpec):
 
     @override
     def prereqs(self) -> Iterable[GenSpec]:
-        return (self._parent,)
+        yield self._parent
+
+type _Nested = GenSpec | type[Spec]
+
+def nested_name_hint(typ: _Nested) -> str:
+    if isinstance(typ, GenSpec):
+        hint = typ._name_hint()
+        return type(typ).__name__ if hint is None else hint
+    else:
+        return typ.__name__
+
+def nested_name(typ: _Nested) -> str:
+    if isinstance(typ, GenSpec):
+        assert typ._name is not None
+        return str(typ._name)
+    else:
+        return f'{typ.__module__}.{typ.__name__}'
+
+
+@flyweight
+@dataclass
+class _BoundedX(GenSpec):
+    inner_type: _Nested
+
+    @override
+    def _name_hint(self) -> str:
+        return f'_Bounded{nested_name_hint(self.inner_type)}'
+
+    @override
+    def generate(self, dest: TextIO) -> None:
+        nn = nested_name(self.inner_type)
+        dest.write(dedent(f"""\
+            class {self._name}(FullSpec, {nn}):
+                _LENGTH_TYPE: type[spec_static._Integral]
+
+                def packed_size(self) -> int:
+                    return self._LENGTH_TYPE._BYTE_LENGTH + super().packed_size()
+
+                def pack(self) -> bytes:
+                    raw = super().pack()
+                    return self._LENGTH_TYPE(len(raw)).pack() + raw
+
+                def pack_to(self, dest: BinaryIO) -> int:
+                    raw = super().pack()
+                    return (
+                        self._LENGTH_TYPE(super().packed_size()).pack_to(dest)
+                        + super().pack_to(dest))
+
+                @classmethod
+                def unpack(cls, raw: bytes) -> Self:
+                    lenlen = cls._LENGTH_TYPE._BYTE_LENGTH
+                    if len(raw) < lenlen:
+                        raise ValueError
+                    length = cls._LENGTH_TYPE.unpack(raw[:lenlen])
+                    if len(raw) != lenlen + length:
+                        raise ValueError
+                    return cls({nn}.unpack(raw[lenlen:]))
+
+                @classmethod
+                def unpack_from(cls, src: BinaryIO, limit: int|None = None) -> tuple[Self, int]:
+                    length, lenlen = cls._LENGTH_TYPE.unpack_from(src, limit)
+                    if limit is not None and limit - lenlen < length:
+                        raise ValueError
+                    raw = force_read(src, length)
+                    return cls({nn}.unpack(raw)), lenlen + length
+            """))
+
+    @override
+    def prereqs(self) -> Iterable[GenSpec]:
+        if isinstance(self.inner_type, GenSpec):
+            yield self.inner_type
+
+@flyweight
+@dataclass
+class Bounded(GenSpec):
+    bit_length: int
+    inner_type: _Nested
+
+    def __post_init__(self) -> None:
+        assert self.bit_length >= 0 and self.bit_length % 8 == 0
+        self._length_type: GenSpec = Uint(self.bit_length)
+        self._parent = _BoundedX(self.inner_type)
+
+    @override
+    def _name_hint(self) -> str:
+        return f'{nested_name_hint(self.inner_type)}{self.bit_length}'
+
+    @override
+    def generate(self, dest: TextIO) -> None:
+        dest.write(dedent(f"""\
+            class {self._name}({nested_name(self._parent)}):
+                _LENGTH_TYPE = {self._length_type._name}
+            """))
+
+    @override
+    def prereqs(self) -> Iterable[GenSpec]:
+        yield self._length_type
+        yield self._parent
+
+@flyweight
+@dataclass(unsafe_hash=True)
+class Sequence(GenSpec):
+    item_tyupe: _Nested
+
+    @override
+    def _name_hint(self) -> str:
+        return f'{nested_name_hint(self.item_tyupe)}Seq'
+
+    @override
+    def generate(self, dest: TextIO) -> None:
+        nn = nested_name(self.item_tyupe)
+        dest.write(dedent(f"""\
+            class {self._name}(spec_static._Sequence[{nn}]):
+                _ITEM_TYPE = {nn}
+            """))
+
+@flyweight
+@dataclass
+class TODO(GenSpec):
+    @override
+    def _name_hint(self) -> str:
+        raise NotImplementedError
+    @override
+    def generate(self, dest: TextIO) -> None:
+        raise NotImplementedError
+    @override
+    def prereqs(self) -> Iterable[GenSpec]:
+        raise NotImplementedError
+
 
 def generate_specs(dest: TextIO, **kwargs: GenSpec) -> None:
     ns = _Names()
@@ -191,10 +321,10 @@ def generate_specs(dest: TextIO, **kwargs: GenSpec) -> None:
 
     dest.write(dedent('''\
         # XXX AUTO-GENERATED - DO NOT EDIT! XXX
-        from typing import Self
+        from typing import Self, override, BinaryIO
         import enum
         import spec_static
-        from spec_static import Json
+        from spec_static import *
         '''))
 
     for spec in togen:

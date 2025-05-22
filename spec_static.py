@@ -1,4 +1,4 @@
-from typing import Self, BinaryIO, TextIO, get_args, Iterable, Protocol, Any, dataclass_transform, ClassVar
+from typing import Self, BinaryIO, TextIO, get_args, Iterable, Protocol, Any, dataclass_transform, ClassVar, override
 from dataclasses import dataclass, field
 import dataclasses
 from io import BytesIO
@@ -93,6 +93,153 @@ class _Integral(_Fixed, int):
             raise ValueError
         return cls(int.from_bytes(raw))
 
+class String(Spec, str):
+    @override
+    def jsonify(self) -> Json:
+        return self
+
+    @override
+    @classmethod
+    def from_json(cls, obj: Json) -> Self:
+        if isinstance(obj, str):
+            return cls(obj)
+        raise ValueError
+
+    @override
+    def packed_size(self) -> int:
+        return len(self.encode('utf8'))
+
+    @override
+    def pack(self) -> bytes:
+        return self.encode('utf8')
+
+    @override
+    def pack_to(self, dest: BinaryIO) -> int:
+        raw = self.encode('utf8')
+        force_write(dest, raw)
+        return len(raw)
+
+    @override
+    @classmethod
+    def unpack(cls, raw: bytes) -> Self:
+        return cls(raw.decode('utf8'))
+
+class Raw(Spec, bytes):
+    def jsonify(self) -> Json:
+        return self.hex()
+
+    @classmethod
+    def from_json(cls, obj: Json) -> Self:
+        if isinstance(obj, str):
+            return cls(bytes.fromhex(obj))
+        raise ValueError
+
+    def packed_size(self) -> int:
+        return len(self)
+
+    def pack(self) -> bytes:
+        return self
+
+    def pack_to(self, dest: BinaryIO) -> int:
+        force_write(dest, self)
+        return len(self)
+
+    @classmethod
+    def unpack(cls, raw: bytes) -> Self:
+        return cls(raw)
+
+class _Sequence[T: FullSpec](Spec, tuple[T,...]):
+    _ITEM_TYPE: type[T]
+
+    @override
+    def jsonify(self) -> Json:
+        return [item.jsonify() for item in self]
+
+    @classmethod
+    def from_json(cls, obj: Json) -> Self:
+        if isinstance(obj, list):
+            return cls(cls._ITEM_TYPE.from_json(entry) for entry in obj)
+        raise ValueError
+
+    def packed_size(self) -> int:
+        return sum(item.packed_size() for item in self)
+
+    def pack(self) -> bytes:
+        return b''.join(item.pack() for item in self)
+
+    def pack_to(self, dest: BinaryIO) -> int:
+        return sum(item.pack_to(dest) for item in self)
+
+    @classmethod
+    def unpack(cls, raw: bytes) -> Self:
+        buf = BytesIO(raw)
+        def elts() -> Iterable[T]:
+            while buf.tell() != len(raw):
+                item, _ = cls._ITEM_TYPE.unpack_from(buf)
+                yield item
+        return cls(elts())
+
+@dataclass(frozen=True)
+class _StructBase(FullSpec):
+    @override
+    def __post_init__(self) -> None:
+        # TODO HERE
+        pass
+
+    def jsonify(self) -> Json:
+        raise NotImplementedError
+
+    @classmethod
+    def from_json(cls, obj: Json) -> Self:
+        raise NotImplementedError
+
+    def packed_size(self) -> int:
+        return len(self.pack())
+
+    def pack(self) -> bytes:
+        raise NotImplementedError
+
+    def pack_to(self, dest: BinaryIO) -> int:
+        raw = self.pack()
+        force_write(dest, raw)
+        return len(raw)
+
+    @classmethod
+    def unpack(cls, raw: bytes) -> Self:
+        raise NotImplementedError
+
+class FullSpec(Spec):
     @classmethod
     def unpack_from(cls, src: BinaryIO, limit: int|None = None) -> tuple[Self, int]:
         raise NotImplementedError
+
+
+'''
+class Spec:
+    def jsonify(self) -> Json:
+        raise NotImplementedError
+
+    @classmethod
+    def from_json(cls, obj: Json) -> Self:
+        raise NotImplementedError
+
+    def packed_size(self) -> int:
+        return len(self.pack())
+
+    def pack(self) -> bytes:
+        raise NotImplementedError
+
+    def pack_to(self, dest: BinaryIO) -> int:
+        raw = self.pack()
+        force_write(dest, raw)
+        return len(raw)
+
+    @classmethod
+    def unpack(cls, raw: bytes) -> Self:
+        raise NotImplementedError
+
+class FullSpec(Spec):
+    @classmethod
+    def unpack_from(cls, src: BinaryIO, limit: int|None = None) -> tuple[Self, int]:
+        raise NotImplementedError
+'''
