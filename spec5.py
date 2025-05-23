@@ -157,9 +157,10 @@ class _SpecEnumX(GenSpec):
     def prereqs(self) -> Iterable[GenSpec]:
         return (self._parent,)
 
-class EnumSpec(GenSpec):
-    def __init__(self, bit_length: int, **kwargs: int) -> None:
+class _EnumSpec(GenSpec):
+    def __init__(self, bit_length: int, missing: str|None, **kwargs: int) -> None:
         self._parent: _SpecEnumX = _SpecEnumX(bit_length)
+        self._missing: str|None = missing
         self._members: tuple[tuple[str, int], ...] = tuple(kwargs.items())
 
     @override
@@ -171,10 +172,25 @@ class EnumSpec(GenSpec):
         dest.write(f"class {self._name}({self._parent._name}):\n")
         for (name, value) in self._members:
             dest.write(f"    {name} = {value}\n")
+        if self._missing is not None:
+            dest.write(indent(dedent(f"""\
+                @classmethod
+                def _missing_(cls, value: Any) -> Self:
+                    logger.warn(f"WARNING: Unrecognized {{cls.__name__}} value {{value}}")
+                    return cls[{repr(self._missing)}]
+                """), '    '))
 
     @override
     def prereqs(self) -> Iterable[GenSpec]:
         yield self._parent
+
+@dataclass
+class EnumSpec:
+    bit_length: int
+    missing: str|None = None
+
+    def __call__(self, **kwargs: int) -> _EnumSpec:
+        return _EnumSpec(self.bit_length, self.missing, **kwargs)
 
 type _Nested = GenSpec | type[Spec] | str
 
@@ -353,7 +369,7 @@ class _SelecteeGen(GenSpec):
         if isinstance(self.data_type, GenSpec):
             yield self.data_type
 
-class Select(GenSpec):
+class _SelectActual(GenSpec):
     def __init__(self, select_type: _Nested, **kwargs: _Nested) -> None:
         self._select_type: _Nested = select_type
         self._selectees: dict[str, _SelecteeGen] = {
@@ -403,6 +419,13 @@ class Select(GenSpec):
     def prereqs(self) -> Iterable[GenSpec]:
         return self._selectees.values()
 
+@dataclass
+class Select:
+    select_type: _Nested
+
+    def __call__(self, **kwargs: _Nested) -> _SelectActual:
+        return _SelectActual(self.select_type, **kwargs)
+
 @flyweight
 @dataclass
 class TODO(GenSpec):
@@ -436,7 +459,7 @@ def generate_specs(dest: TextIO, **kwargs: GenSpec) -> None:
 
     dest.write(dedent('''\
         # XXX AUTO-GENERATED - DO NOT EDIT! XXX
-        from typing import Self, override, BinaryIO, ClassVar
+        from typing import Self, override, BinaryIO, ClassVar, Any
         import enum
         import dataclasses
         from dataclasses import dataclass
