@@ -202,7 +202,7 @@ specs: dict[str, GenSpec] = kwdict(
         CHACHA20_POLY1305 = 0x0003,
     ),
 
-    PskBinders = Bounded(2, Sequence(Bounded(1, Raw))),
+    PskBinders = Bounded(16, Sequence(Bounded(8, Raw))),
 
     HkdfLabel = Struct(
         length  = Uint(16),
@@ -217,7 +217,7 @@ specs: dict[str, GenSpec] = kwdict(
         identity              = Bounded(16, Raw),
         obfuscated_ticket_age = Uint(32),
     ),
-    HpkeSymmetricCipherSuite = Struct((
+    HpkeSymmetricCipherSuite = Struct(
         kdf_id  = 'HpkeKdfId',
         aead_id = 'HpkeAeadId',
     ),
@@ -226,15 +226,13 @@ specs: dict[str, GenSpec] = kwdict(
         #TODO FIXME 16 bit bounded
         SEVER_NAME =
             Sequence(Bounded(16, Struct(
-                name_type = Uint(8).const(0),
+                name_type = Uint(8), # TODO FIXME .const(0),
                 host_name = Bounded(16, String),
             ))),
         SUPPORTED_GROUPS =
             Bounded(16, Sequence(NamedGroup)),
         SIGNATURE_ALGORITHMS =
             Bounded(16, Sequence(SignatureScheme)),
-        SUPPORTED_VERSIONS =
-            Bounded(8, Version.TLS_1_3.as_const()),
         SUPPORTED_VERSIONS =
             Bounded(8, Sequence(Version)),
         PSK_KEY_EXCHANGE_MODES =

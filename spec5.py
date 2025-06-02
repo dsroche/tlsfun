@@ -269,7 +269,7 @@ class _BoundedX(GenSpec):
             yield self.inner_type
 
 @flyweight
-@dataclass
+@dataclass(unsafe_hash=True)
 class Bounded(GenSpec):
     bit_length: int
     inner_type: _Nested
