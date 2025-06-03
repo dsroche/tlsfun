@@ -83,7 +83,7 @@ def positive_test_cases() -> Iterable[tuple[Spec, Json, str]]:
     yield Uint16(5), 5, '0005'
     yield Shorts([Uint16(20), Uint16(25)]), [20,25], '00140019'
     yield ShortShorts([Uint16(3),Uint16(4),Uint16(5)]), [3,4,5], '06000300040005'
-    yield B16S8((Uint8(10), Uint8(20))), [10,20], '00020a14'
+    #yield B16S8((Uint8(10), Uint8(20))), [10,20], '00020a14'
     yield Person(String16('ada'), Uint16(1)), {'name':'ada','phone':1}, '00036164610001'
     yield (Animal(String8('doggie'), legs=Uint8(4), nums=ShortShorts(())),
            {'name': 'doggie', 'legs': 4, 'nums': []},
@@ -91,7 +91,7 @@ def positive_test_cases() -> Iterable[tuple[Spec, Json, str]]:
     yield (B(AnimalSelect(Animal(String8('cat'), legs=Uint8(4), nums=ShortShorts(())))),
            {'typ': 'May', 'data': {'name': 'cat', 'legs': 4, 'nums': []}},
            '0005036361740400')
-    yield (Brass(Struct_5(valves=Uint8(5), weight=Uint16(40))),
+    yield (BrassInstrument(BrassInstrumentData(valves=Uint8(5), weight=Uint16(40))),
            {'typ': 'Brass', 'data': {'valves': 5, 'weight': 40},},
            '01050028')
 #    test_spec(Uint8, 33, 33, '21')

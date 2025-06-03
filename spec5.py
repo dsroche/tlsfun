@@ -11,98 +11,6 @@ from spec_static import *
 
 type Nested = 'GenSpec' | type[Spec] | str
 
-def write_tuple(items: Iterable[str]) -> str:
-    it = iter(items)
-    try:
-        first = next(it)
-    except StopIteration:
-        return '()'
-    return f"({first}, {', '.join(it)})"
-
-FORCE_RANK = float('inf')
-
-@dataclass(frozen=True)
-class NameRank:
-    name: str
-    rank: float
-
-    def __or__(self, rhs: Self) -> Self:
-        if self.rank >= rhs.rank:
-            if rhs.rank == FORCE_RANK and rhs.name != self.name:
-                raise ValueError(f"can't decide between names {self.name} and {rhs.name} with max rank")
-            return self
-        else:
-            return rhs
-
-class GenSpec:
-    def generate(self, dest: TextIO, names: dict['GenSpec',str]) -> None:
-        raise NotImplementedError
-
-    def prereqs(self, names: 'Names') -> Iterable[Nested]:
-        return ()
-
-    def _name_hint(self, names: 'Names') -> NameRank:
-        return NameRank(type(self).__name__, 1)
-
-@dataclass
-class Names:
-    _order: list[GenSpec] = field(default_factory=list)
-    _stubs: dict[GenSpec, NameRank] = field(default_factory=dict)
-
-    def register(self, spec: GenSpec) -> None:
-        if spec in self._stubs:
-            return # already registered
-        for prereq in spec.prereqs(self):
-            if isinstance(prereq, GenSpec):
-                self.register(prereq)
-        self._order.append(spec)
-        self._stubs[spec] = spec._name_hint(self)
-
-    def suggest(self, spec: GenSpec, name: NameRank) -> None:
-        self.register(spec)
-        self._stubs[spec] |= name
-
-    def current_stub(self, item: Nested) -> str:
-        match item:
-            case GenSpec():
-                self.register(item)
-                return self._stubs[item].name
-            case type():
-                return item.__name__
-            case str():
-                return item
-
-    def assign(self) -> dict[GenSpec,str]:
-        counts: Counter[str] = Counter()
-        for spec in self._order:
-            stub = self._stubs[spec].name
-            counts[stub] += 1
-        assignment = {}
-        for spec in self._order:
-            stub = self._stubs[spec].name
-            count = counts[stub]
-            if count == 1:
-                assignment[spec] = stub
-                index = 1
-            else:
-                index = 1 if (count > 1) else -count
-                assignment[spec] = f'{stub}_{index}'
-            counts[stub] = -index - 1
-        return assignment
-
-    def order(self) -> Iterable[GenSpec]:
-        yield from self._order
-
-def get_name(names: dict[GenSpec, str], spec: Nested) -> str:
-    match spec:
-        case GenSpec():
-            return names[spec]
-        case type():
-            return f"{spec.__module__}.{spec.__name__}"
-        case str():
-            return spec
-
-
 def flyweight[T](cls: type[T]) -> type[T]:
     """Decorator to create only one instance of the class with the same init() arguments."""
     original_new = cls.__new__
@@ -132,6 +40,89 @@ def flyweight[T](cls: type[T]) -> type[T]:
 
     return cls
 
+def write_tuple(items: Iterable[str]) -> str:
+    it = iter(items)
+    try:
+        first = next(it)
+    except StopIteration:
+        return '()'
+    return f"({first}, {', '.join(it)})"
+
+def exact_lstrip(orig: str, prefix: str) -> str:
+    if orig.startswith(prefix):
+        return orig[len(prefix):]
+    else:
+        return orig
+
+def exact_rstrip(orig: str, suffix: str, new_suffix: str = '') -> str:
+    if orig.endswith(suffix):
+        return orig[:-len(suffix)]
+    else:
+        return orig + new_suffix
+
+def camel_case(orig: str) -> str:
+    return orig.replace('_',' ').title().replace(' ','')
+
+FORCE_RANK = float('inf')
+
+@dataclass
+class NameRank:
+    name: str = field(default='Spec')
+    rank: float = field(default=0.0)
+
+    def update(self, name2: str, rank2: float|None = None) -> bool:
+        if rank2 is None:
+            rank2 = self.rank
+        if rank2 >= self.rank:
+            if self.rank == FORCE_RANK and name2 != self.name:
+                raise ValueError(f"can't decide between names {self.name} and {name2} with max rank")
+            self.name = name2
+            self.rank = rank2
+            return True
+        else:
+            return False
+
+@dataclass(frozen=True)
+class GenSpec:
+    _name_stub: NameRank = field(default_factory=NameRank, kw_only=True, hash=False, compare=False)
+
+    @property
+    def stub(self) -> str:
+        return self._name_stub.name
+
+    @property
+    def stub_rank(self) -> float:
+        return self._name_stub.rank
+
+    def update_stub(self, name: str, rank: float) -> bool:
+        return self._name_stub.update(name, rank)
+
+    def suggest(self, name: str, rank: float) -> bool:
+        return self.update_stub(name, rank)
+
+    def generate(self, dest: TextIO, names: dict['GenSpec',str]) -> None:
+        raise NotImplementedError
+
+    def prereqs(self) -> Iterable[Nested]:
+        return ()
+
+def get_stub(typ: Nested) -> str:
+    match typ:
+        case GenSpec():
+            return typ.stub
+        case type():
+            return typ.__name__
+        case str():
+            return typ
+
+def maybe_suggest(typ: Nested, name: str, rank: float) -> bool:
+    if isinstance(typ, GenSpec):
+        return typ.suggest(name, rank)
+    elif rank == FORCE_RANK and name != get_stub(typ):
+        raise ValueError(f"Can't force name of {get_stub(typ)} to {name}")
+    else:
+        return False
+
 @flyweight
 @dataclass(frozen=True)
 class Uint(GenSpec):
@@ -139,6 +130,7 @@ class Uint(GenSpec):
 
     def __post_init__(self) -> None:
         assert self.bit_length >= 0 and self.bit_length % 8 == 0
+        self.suggest(f'Uint{self.bit_length}', 100)
 
     @override
     def generate(self, dest: TextIO, names: dict[GenSpec,str]) -> None:
@@ -147,10 +139,6 @@ class Uint(GenSpec):
                 _BYTE_LENGTH = {self.bit_length // 8}
             """))
 
-    @override
-    def _name_hint(self, names: Names) -> NameRank:
-        return NameRank(f'Uint{self.bit_length}', 100)
-
 @flyweight
 @dataclass(frozen=True)
 class _FixedX(GenSpec):
@@ -158,6 +146,7 @@ class _FixedX(GenSpec):
 
     def __post_init__(self) -> None:
         assert self.bit_length >= 0 and self.bit_length % 8 == 0
+        self.suggest(f'Fixed{self.bit_length}', 100)
 
     @override
     def generate(self, dest: TextIO, names: dict[GenSpec,str]) -> None:
@@ -165,10 +154,6 @@ class _FixedX(GenSpec):
             class {names[self]}(spec_static._Fixed):
                 _BYTE_LENGTH = {self.bit_length // 8}
             """))
-
-    @override
-    def _name_hint(self, names: Names) -> NameRank:
-        return NameRank(f'Fixed{self.bit_length}', 100)
 
 @flyweight
 @dataclass(frozen=True)
@@ -178,6 +163,9 @@ class _SpecEnumX(GenSpec):
     @property
     def _parent(self) -> _FixedX:
         return _FixedX(self.bit_length)
+
+    def __post_init__(self) -> None:
+        self.suggest(f'Enum{self.bit_length}', 100)
 
     @override
     def generate(self, dest: TextIO, names: dict[GenSpec,str]) -> None:
@@ -206,18 +194,18 @@ class _SpecEnumX(GenSpec):
             """))
 
     @override
-    def prereqs(self, names: Names) -> Iterable[Nested]:
+    def prereqs(self) -> Iterable[Nested]:
         yield self._parent
 
-    @override
-    def _name_hint(self, names: Names) -> NameRank:
-        return NameRank(f'SpecEnum{self.bit_length}', 90)
 
 @dataclass(frozen=True)
 class _EnumSpec(GenSpec):
     _parent: _SpecEnumX
     _missing: str|None
     _members: tuple[tuple[str, int], ...]
+
+    def __post_init__(self) -> None:
+        self.suggest('EnumSpec', 5)
 
     @override
     def generate(self, dest: TextIO, names: dict[GenSpec,str]) -> None:
@@ -233,12 +221,8 @@ class _EnumSpec(GenSpec):
                 """), '    '))
 
     @override
-    def prereqs(self, names: Names) -> Iterable[Nested]:
+    def prereqs(self) -> Iterable[Nested]:
         yield self._parent
-
-    @override
-    def _name_hint(self, names: Names) -> NameRank:
-        return NameRank(f'Enum{self._parent.bit_length}', 90)
 
 @dataclass
 class EnumSpec:
@@ -257,6 +241,18 @@ class EnumSpec:
 @dataclass(frozen=True)
 class _BoundedX(GenSpec):
     inner_type: Nested
+
+    def __post_init__(self) -> None:
+        self.update_stub(f'Bounded{get_stub(self.inner_type)}', 70)
+
+    @override
+    def suggest(self, name: str, rank: float) -> bool:
+        if rank == FORCE_RANK:
+            return self.update_stub(name, rank)
+        elif maybe_suggest(self.inner_type, name, min(90, rank)):
+            return self.update_stub(f'Bounded{get_stub(self.inner_type)}', 70)
+        else:
+            return False
 
     @override
     def generate(self, dest: TextIO, names: dict[GenSpec,str]) -> None:
@@ -318,12 +314,8 @@ class _BoundedX(GenSpec):
             """))
 
     @override
-    def prereqs(self, names: Names) -> Iterable[Nested]:
+    def prereqs(self) -> Iterable[Nested]:
         yield self.inner_type
-
-    @override
-    def _name_hint(self, names: Names) -> NameRank:
-        return NameRank(f'Bounded{names.current_stub(self.inner_type)}', 80)
 
 @flyweight
 @dataclass(frozen=True)
@@ -335,6 +327,24 @@ class _Bounded(GenSpec):
     def _parent(self) -> _BoundedX:
         return _BoundedX(self.inner_type)
 
+    def _name_suggestion(self) -> str:
+        pstub = exact_lstrip(self._parent.stub, 'Bounded')
+        prefix = ''.join(f'B{lt.bit_length}' for lt in self.length_types)
+        print("COMPUTING BOUNDED NAME SUGGESTION", self._parent.stub, prefix, pstub)
+        return f'{prefix}{pstub}'
+
+    def __post_init__(self) -> None:
+        self.update_stub(self._name_suggestion(), 70)
+
+    @override
+    def suggest(self, name: str, rank: float) -> bool:
+        if rank == FORCE_RANK:
+            return self.update_stub(name, rank)
+        elif self._parent.suggest(name, min(rank, 90)):
+            return self.update_stub(self._name_suggestion(), 70)
+        else:
+            return False
+
     @override
     def generate(self, dest: TextIO, names: dict[GenSpec,str]) -> None:
         dest.write(dedent(f"""\
@@ -343,16 +353,9 @@ class _Bounded(GenSpec):
             """))
 
     @override
-    def prereqs(self, names: Names) -> Iterable[Nested]:
+    def prereqs(self) -> Iterable[Nested]:
         yield self._parent
         yield from self.length_types
-
-    @override
-    def _name_hint(self, names: Names) -> NameRank:
-        pstub = names.current_stub(self._parent)
-        istub = pstub[7:] if pstub.startswith('Bounded') else pstub
-        suffix = '_'.join(str(lt.bit_length) for lt in self.length_types)
-        return NameRank(f'{istub}{suffix}', 80)
 
 def Bounded(bit_length: int, inner_type: Nested) -> _Bounded:
     lt = Uint(bit_length)
@@ -367,6 +370,21 @@ def Bounded(bit_length: int, inner_type: Nested) -> _Bounded:
 class Sequence(GenSpec):
     item_type: Nested
 
+    def _name_suggestion(self) -> str:
+        return f'Seq{get_stub(self.item_type)}'
+
+    def __post_init__(self) -> None:
+        self.update_stub(self._name_suggestion(), 70)
+
+    @override
+    def suggest(self, name: str, rank: float) -> bool:
+        if rank == FORCE_RANK:
+            return self.update_stub(name, rank)
+        elif maybe_suggest(self.item_type, exact_rstrip(name, 's'), min(rank, 90)):
+            return self.update_stub(self._name_suggestion(), 70)
+        else:
+            return False
+
     @override
     def generate(self, dest: TextIO, names: dict[GenSpec,str]) -> None:
         nn = get_name(names, self.item_type)
@@ -376,16 +394,18 @@ class Sequence(GenSpec):
             """))
 
     @override
-    def prereqs(self, names: Names) -> Iterable[Nested]:
+    def prereqs(self) -> Iterable[Nested]:
         yield self.item_type
-
-    @override
-    def _name_hint(self, names: Names) -> NameRank:
-        return NameRank(f'{names.current_stub(self.item_type)}Seq', 80)
 
 @dataclass(frozen=True)
 class _Struct(GenSpec):
     schema: tuple[tuple[str, Nested], ...]
+
+    def __post_init__(self) -> None:
+        self.suggest('Struct', 10)
+        for name,typ in self.schema:
+            if isinstance(typ, GenSpec):
+                typ.suggest(name, 30)
 
     @override
     def generate(self, dest: TextIO, names: dict[GenSpec,str]) -> None:
@@ -399,25 +419,35 @@ class _Struct(GenSpec):
             dest.write(f'    {name}: {get_name(names,typ)}\n')
 
     @override
-    def prereqs(self, names: Names) -> Iterable[Nested]:
-        for name,typ in self.schema:
-            if isinstance(typ, GenSpec):
-                names.suggest(typ, NameRank(name, 20))
+    def prereqs(self) -> Iterable[Nested]:
+        for _,typ in self.schema:
             yield typ
-
-    @override
-    def _name_hint(self, names: Names) -> NameRank:
-        return NameRank('Struct', 10)
 
 def Struct(**kwargs: Nested) -> _Struct:
     return _Struct(tuple(kwargs.items()))
 
 @dataclass(frozen=True)
 class _SelecteeGen(GenSpec):
-    parent: GenSpec
     select_type: Nested
     selection: str
     data_type: Nested
+    parent: '_SelectActual|None' = field(default=None, hash=False, compare=False)
+
+    def __post_init__(self) -> None:
+        self.suggest(f'{self.selection}Selection', 30)
+
+    @override
+    def suggest(self, name: str, rank: float) -> bool:
+        if self.update_stub(name, rank):
+            maybe_suggest(self.data_type, f'{name}Data', 20)
+            return True
+        else:
+            return False
+
+    # TODO XXX remove?? it's not used FIXME
+    def set_parent(self, parent_: '_SelectActual') -> None:
+        assert self.parent is None
+        object.__setattr__(self, 'parent', parent_)
 
     @override
     def generate(self, dest: TextIO, names: dict[GenSpec,str]) -> None:
@@ -430,35 +460,44 @@ class _SelecteeGen(GenSpec):
             """))
 
     @override
-    def prereqs(self, names: Names) -> Iterable[Nested]:
+    def prereqs(self) -> Iterable[Nested]:
         yield self.select_type
         yield self.data_type
 
-    @override
-    def _name_hint(self, names: Names) -> NameRank:
-        return NameRank(f'{self.selection}Selection', 30)
-
+@dataclass(frozen=True)
 class _SelectActual(GenSpec):
-    def __init__(self, select_type: Nested, bit_length: int|None, **kwargs: Nested) -> None:
-        self._select_type: Nested = select_type
-        self._selectees: dict[str, _SelecteeGen] = {
-            key: (_SelecteeGen(self, select_type, key, value)
-                  if bit_length is None
-                  else _SelecteeGen(self, select_type, key, Bounded(bit_length, value)))
-            for (key,value) in kwargs.items()}
+    select_type: Nested
+    selectees: tuple[tuple[str, _SelecteeGen], ...]
+
+    def __post_init__(self) -> None:
+        sname = get_stub(self.select_type)
+        self.update_stub(exact_rstrip(sname, 'Type', 'Obj'), 60)
+        for name, sel in self.selectees:
+            sel.set_parent(self) #TODO maybe remove?
+            sel.suggest(camel_case(name) + self.stub, 40)
+
+    @override
+    def suggest(self, name: str, rank: float) -> bool:
+        if self.update_stub(name, rank):
+            stub = exact_rstrip(name, 'Obj')
+            for sname, sgen in self.selectees:
+                sgen.suggest(camel_case(sname) + stub, 40)
+            return True
+        else:
+            return False
 
     @override
     def generate(self, dest: TextIO, names: dict[GenSpec,str]) -> None:
-        sname = get_name(names, self._select_type)
+        sname = get_name(names, self.select_type)
         tname = f'{names[self]}Variants'
-        dest.write(dedent(f"""\
-            type {tname} = {' | '.join(str(names[s]) for s in self._selectees.values())}
+        dest.write(dedent(f"""
+            type {tname} = {' | '.join(str(names[s]) for _,s in self.selectees)}
 
             class {names[self]}(spec_static._Select[{sname}]):
                 _SELECT_TYPE = {sname}
                 _SELECTEES = {{
             """))
-        for key, s in self._selectees.items():
+        for key, s in self.selectees:
             dest.write(f"        {sname}.{key}: {names[s]},\n")
         dest.write("    }\n")
         dest.write(indent("    ", dedent(f"""\
@@ -471,19 +510,10 @@ class _SelectActual(GenSpec):
             """)))
 
     @override
-    def prereqs(self, names: Names) -> Iterable[Nested]:
-        yield self._select_type
-        for (name,sgen) in self._selectees.items():
-            names.suggest(sgen, NameRank(name, 40))
-            yield sgen
-
-    @override
-    def _name_hint(self, names: Names) -> NameRank:
-        sname = names.current_stub(self._select_type)
-        return NameRank(sname[:-4]
-                        if sname.endswith('Type')
-                        else f'{sname}Obj',
-                        60)
+    def prereqs(self) -> Iterable[Nested]:
+        yield self.select_type
+        for _,sel in self.selectees:
+            yield sel
 
 @dataclass
 class Select:
@@ -491,13 +521,61 @@ class Select:
     bit_length: int|None = field(default=None)
 
     def __call__(self, **kwargs: Nested) -> _SelectActual:
-        return _SelectActual(self.select_type, self.bit_length, **kwargs)
+        return _SelectActual(
+            self.select_type,
+            tuple((enum_key,
+                   _SelecteeGen(self.select_type, enum_key,
+                                (typ if self.bit_length is None
+                                 else Bounded(self.bit_length, typ))))
+                  for (enum_key, typ) in kwargs.items()),
+        )
 
+
+@dataclass
+class Names:
+    _order: list[GenSpec] = field(default_factory=list)
+    _registered: set[GenSpec] = field(default_factory=set)
+
+    def register(self, spec: GenSpec) -> None:
+        if spec in self._registered:
+            return # already registered
+        self._registered.add(spec)
+        for prereq in spec.prereqs():
+            if isinstance(prereq, GenSpec):
+                self.register(prereq)
+        self._order.append(spec)
+
+    def assign(self) -> dict[GenSpec,str]:
+        counts: Counter[str] = Counter()
+        for spec in self._order:
+            counts[spec.stub] += 1
+        assignment = {}
+        for spec in self._order:
+            count = counts[spec.stub]
+            if count == 1:
+                assignment[spec] = spec.stub
+                index = 1
+            else:
+                index = 1 if (count > 1) else -count
+                assignment[spec] = f'{spec.stub}_{index}'
+            counts[spec.stub] = -index - 1
+        return assignment
+
+    def order(self) -> Iterable[GenSpec]:
+        yield from self._order
+
+def get_name(names: dict[GenSpec, str], spec: Nested) -> str:
+    match spec:
+        case GenSpec():
+            return names[spec]
+        case type():
+            return f"{spec.__module__}.{spec.__name__}"
+        case str():
+            return spec
 
 @dataclass
 class SourceGen:
     dest: TextIO
-    ns: Names
     names: dict[GenSpec,str]
     _written: set[GenSpec] = field(default_factory=set)
 
@@ -514,7 +592,7 @@ class SourceGen:
 
     def write(self, spec: GenSpec) -> None:
         if spec not in self._written:
-            for pre in spec.prereqs(self.ns):
+            for pre in spec.prereqs():
                 if isinstance(pre, GenSpec):
                     self.write(pre)
             self._written.add(spec)
@@ -530,9 +608,7 @@ def generate_specs(dest: TextIO, **kwargs: GenSpec) -> None:
     ns = Names()
 
     for (name, spec) in kwargs.items():
+        spec.suggest(name, FORCE_RANK)
         ns.register(spec)
-        ns.suggest(spec, NameRank(name, FORCE_RANK))
 
-    names = ns.assign()
-
-    SourceGen(dest, ns, names).write_all(ns.order())
+    SourceGen(dest, ns.assign()).write_all(ns.order())

@@ -5,6 +5,7 @@ from spec5 import *
 from typing import override, TextIO
 class Comment(GenSpec): #TODO dumb
     def __init__(self, *args: str) -> None:
+        super().__init__()
         pass
     @override
     def generate(self, dest: TextIO, names: dict['GenSpec',str]) -> None:
@@ -202,8 +203,6 @@ specs: dict[str, GenSpec] = kwdict(
         CHACHA20_POLY1305 = 0x0003,
     ),
 
-    PskBinders = Bounded(16, Sequence(Bounded(8, Raw))),
-
     HkdfLabel = Struct(
         length  = Uint(16),
         label   = Bounded(8, Raw),
@@ -246,7 +245,8 @@ specs: dict[str, GenSpec] = kwdict(
         PRE_SHARED_KEY =
             Struct(
                 identities = Bounded(16, Sequence('PskIdentity')),
-                binders    = 'PskBinders',
+                binders    = Bounded(16, Sequence(Bounded(8, Raw))),
+
             ),
         ENCRYPTED_CLIENT_HELLO =
             Select('ECHClientHelloType')(
@@ -449,6 +449,7 @@ payload = _record_body_spec
     Uint24 = Uint(24),
     Raw8 = Bounded(8, Raw),
     Raw16 = Bounded(16, Raw),
+    String8 = Bounded(8, String),
     String16 = Bounded(16, String),
     Shorts = Sequence(Uint(16)),
     ShortShorts = Bounded(8, Sequence(Uint(16))),
@@ -470,7 +471,7 @@ payload = _record_body_spec
     Instrument = Select('InstrumentType')(
         Brass = Struct(
             valves = 'Uint8',
-            weight = 'Uint16',
+            weight = Uint(16),
         ),
         Woodwind = Bounded(8, String),
     ),
