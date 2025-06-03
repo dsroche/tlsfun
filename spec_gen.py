@@ -7,7 +7,7 @@ class Comment(GenSpec): #TODO dumb
     def __init__(self, *args: str) -> None:
         pass
     @override
-    def generate(self, dest: TextIO, names: Names) -> None:
+    def generate(self, dest: TextIO, names: dict['GenSpec',str]) -> None:
         pass
 
 def kwdict[T](**kwargs: T) -> dict[str, T]:

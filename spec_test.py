@@ -91,7 +91,7 @@ def positive_test_cases() -> Iterable[tuple[Spec, Json, str]]:
     yield (B(AnimalSelect(Animal(String8('cat'), legs=Uint8(4), nums=ShortShorts(())))),
            {'typ': 'May', 'data': {'name': 'cat', 'legs': 4, 'nums': []}},
            '0005036361740400')
-    yield (Instrument(InstrumentBrass(Struct(valves=Uint8(5), weight=Uint16(40)))),
+    yield (Brass(Struct_5(valves=Uint8(5), weight=Uint16(40))),
            {'typ': 'Brass', 'data': {'valves': 5, 'weight': 40},},
            '01050028')
 #    test_spec(Uint8, 33, 33, '21')
@@ -109,7 +109,11 @@ def error_test_cases() -> Iterable[tuple[type[Spec], Json, str]]:
 def all_tests() -> None:
     count = 0
     for (orig, js, rawhex) in positive_test_cases():
-        test_spec(orig, js, rawhex)
+        try:
+            test_spec(orig, js, rawhex)
+        except:
+            print("FAILURE on positive run", orig, js, rawhex)
+            raise
         count += 1
     for (cls, js, rawhex) in error_test_cases():
         test_error(cls, js, rawhex)

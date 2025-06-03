@@ -11,61 +11,97 @@ from spec_static import *
 
 type Nested = 'GenSpec' | type[Spec] | str
 
-@dataclass
-class Names:
-    _stubs: dict['GenSpec', tuple[str, int]] = field(default_factory=dict)
-    _counts: Counter[str] = field(default_factory=Counter)
-    _assigned: bool = field(default=False)
+def write_tuple(items: Iterable[str]) -> str:
+    it = iter(items)
+    try:
+        first = next(it)
+    except StopIteration:
+        return '()'
+    return f"({first}, {', '.join(it)})"
 
-    def stub(self, item: Nested, suggestion: str|None = None) -> str:
-        match item:
-            case GenSpec():
-                self.register(item, suggestion)
-                return self._stubs[item][0]
-            case type():
-                return item.__name__
-            case str():
-                return item
+FORCE_RANK = float('inf')
 
-    def register(self, item: 'GenSpec', suggestion: str|None) -> None:
-        if item in self._stubs:
-            return # already registered
-        if self._assigned:
-            raise ValueError("Can't register new item after assigning names")
-        prereq_stubs = [self.stub(prereq, psug)
-                        for (prereq, psug) in item.prereqs()]
-        stub = item._name_hint(prereq_stubs) if suggestion is None else suggestion
-        count = self._counts[stub] + 1
-        self._counts[stub] = count
-        self._stubs[item] = (stub, count)
+@dataclass(frozen=True)
+class NameRank:
+    name: str
+    rank: float
 
-    def assign(self) -> None:
-        self._assigned = True
-
-    def __getitem__(self, item: Nested) -> str:
-        if not self._assigned:
-            raise ValueError("Can't get item names before calling .assign()")
-        match item:
-            case GenSpec():
-                (stub, count) = self._stubs[item]
-                if self._counts[stub] > 1:
-                    return f"{stub}_{count}"
-                else:
-                    return stub
-            case type():
-                return item.__name__
-            case str():
-                return item
+    def __or__(self, rhs: Self) -> Self:
+        if self.rank >= rhs.rank:
+            if rhs.rank == FORCE_RANK and rhs.name != self.name:
+                raise ValueError(f"can't decide between names {self.name} and {rhs.name} with max rank")
+            return self
+        else:
+            return rhs
 
 class GenSpec:
-    def generate(self, dest: TextIO, names: Names) -> None:
+    def generate(self, dest: TextIO, names: dict['GenSpec',str]) -> None:
         raise NotImplementedError
 
-    def prereqs(self) -> Iterable[tuple[Nested, str|None]]:
+    def prereqs(self, names: 'Names') -> Iterable[Nested]:
         return ()
 
-    def _name_hint(self, pstubs: Iterable[str]) -> str:
-        return type(self).__name__
+    def _name_hint(self, names: 'Names') -> NameRank:
+        return NameRank(type(self).__name__, 1)
+
+@dataclass
+class Names:
+    _order: list[GenSpec] = field(default_factory=list)
+    _stubs: dict[GenSpec, NameRank] = field(default_factory=dict)
+
+    def register(self, spec: GenSpec) -> None:
+        if spec in self._stubs:
+            return # already registered
+        for prereq in spec.prereqs(self):
+            if isinstance(prereq, GenSpec):
+                self.register(prereq)
+        self._order.append(spec)
+        self._stubs[spec] = spec._name_hint(self)
+
+    def suggest(self, spec: GenSpec, name: NameRank) -> None:
+        self.register(spec)
+        self._stubs[spec] |= name
+
+    def current_stub(self, item: Nested) -> str:
+        match item:
+            case GenSpec():
+                self.register(item)
+                return self._stubs[item].name
+            case type():
+                return item.__name__
+            case str():
+                return item
+
+    def assign(self) -> dict[GenSpec,str]:
+        counts: Counter[str] = Counter()
+        for spec in self._order:
+            stub = self._stubs[spec].name
+            counts[stub] += 1
+        assignment = {}
+        for spec in self._order:
+            stub = self._stubs[spec].name
+            count = counts[stub]
+            if count == 1:
+                assignment[spec] = stub
+                index = 1
+            else:
+                index = 1 if (count > 1) else -count
+                assignment[spec] = f'{stub}_{index}'
+            counts[stub] = -index - 1
+        return assignment
+
+    def order(self) -> Iterable[GenSpec]:
+        yield from self._order
+
+def get_name(names: dict[GenSpec, str], spec: Nested) -> str:
+    match spec:
+        case GenSpec():
+            return names[spec]
+        case type():
+            return f"{spec.__module__}.{spec.__name__}"
+        case str():
+            return spec
+
 
 def flyweight[T](cls: type[T]) -> type[T]:
     """Decorator to create only one instance of the class with the same init() arguments."""
@@ -105,15 +141,15 @@ class Uint(GenSpec):
         assert self.bit_length >= 0 and self.bit_length % 8 == 0
 
     @override
-    def generate(self, dest: TextIO, names: Names) -> None:
+    def generate(self, dest: TextIO, names: dict[GenSpec,str]) -> None:
         dest.write(dedent(f"""\
             class {names[self]}(spec_static._Integral):
                 _BYTE_LENGTH = {self.bit_length // 8}
             """))
 
     @override
-    def _name_hint(self, pstubs: Iterable[str]) -> str:
-        return f'Uint{self.bit_length}'
+    def _name_hint(self, names: Names) -> NameRank:
+        return NameRank(f'Uint{self.bit_length}', 100)
 
 @flyweight
 @dataclass(frozen=True)
@@ -124,15 +160,15 @@ class _FixedX(GenSpec):
         assert self.bit_length >= 0 and self.bit_length % 8 == 0
 
     @override
-    def generate(self, dest: TextIO, names: Names) -> None:
+    def generate(self, dest: TextIO, names: dict[GenSpec,str]) -> None:
         dest.write(dedent(f"""\
             class {names[self]}(spec_static._Fixed):
                 _BYTE_LENGTH = {self.bit_length // 8}
             """))
 
     @override
-    def _name_hint(self, pstubs: Iterable[str]) -> str:
-        return f'Fixed{self.bit_length}'
+    def _name_hint(self, names: Names) -> NameRank:
+        return NameRank(f'Fixed{self.bit_length}', 100)
 
 @flyweight
 @dataclass(frozen=True)
@@ -144,7 +180,7 @@ class _SpecEnumX(GenSpec):
         return _FixedX(self.bit_length)
 
     @override
-    def generate(self, dest: TextIO, names: Names) -> None:
+    def generate(self, dest: TextIO, names: dict[GenSpec,str]) -> None:
         dest.write(dedent(f"""\
             class {names[self]}({names[self._parent]}, spec_static._SpecEnum):
                 def jsonify(self) -> Json:
@@ -170,12 +206,12 @@ class _SpecEnumX(GenSpec):
             """))
 
     @override
-    def prereqs(self) -> Iterable[tuple[Nested, str|None]]:
-        yield (self._parent, None)
+    def prereqs(self, names: Names) -> Iterable[Nested]:
+        yield self._parent
 
     @override
-    def _name_hint(self, pstubs: Iterable[str]) -> str:
-        return f'_SpecEnum{self.bit_length}'
+    def _name_hint(self, names: Names) -> NameRank:
+        return NameRank(f'SpecEnum{self.bit_length}', 90)
 
 @dataclass(frozen=True)
 class _EnumSpec(GenSpec):
@@ -184,7 +220,7 @@ class _EnumSpec(GenSpec):
     _members: tuple[tuple[str, int], ...]
 
     @override
-    def generate(self, dest: TextIO, names: Names) -> None:
+    def generate(self, dest: TextIO, names: dict[GenSpec,str]) -> None:
         dest.write(f"class {names[self]}({names[self._parent]}):\n")
         for (name, value) in self._members:
             dest.write(f"    {name} = {value}\n")
@@ -197,12 +233,12 @@ class _EnumSpec(GenSpec):
                 """), '    '))
 
     @override
-    def prereqs(self) -> Iterable[tuple[Nested, str|None]]:
-        yield (self._parent, None)
+    def prereqs(self, names: Names) -> Iterable[Nested]:
+        yield self._parent
 
     @override
-    def _name_hint(self, pstubs: Iterable[str]) -> str:
-        return f'Enumeration{self._parent.bit_length}'
+    def _name_hint(self, names: Names) -> NameRank:
+        return NameRank(f'Enum{self._parent.bit_length}', 90)
 
 @dataclass
 class EnumSpec:
@@ -223,87 +259,108 @@ class _BoundedX(GenSpec):
     inner_type: Nested
 
     @override
-    def generate(self, dest: TextIO, names: Names) -> None:
-        nn = names[self.inner_type]
+    def generate(self, dest: TextIO, names: dict[GenSpec,str]) -> None:
+        nn = get_name(names, self.inner_type)
         dest.write(dedent(f"""\
             class {names[self]}({nn}, FullSpec):
-                _LENGTH_TYPE: type[spec_static._Integral]
+                _LENGTH_TYPES: tuple[type[spec_static._Integral],...]
 
+                @override
                 def packed_size(self) -> int:
-                    return self._LENGTH_TYPE._BYTE_LENGTH + super().packed_size()
+                    return sum(LT._BYTE_LENGTH for LT in self._LENGTH_TYPES) + super().packed_size()
 
+                @override
                 def pack(self) -> bytes:
                     raw = super().pack()
-                    return self._LENGTH_TYPE(len(raw)).pack() + raw
+                    length = len(raw)
+                    parts = [raw]
+                    for LT in reversed(self._LENGTH_TYPES):
+                        parts.append(LT(length).pack())
+                        length += LT._BYTE_LENGTH
+                    parts.reverse()
+                    return b''.join(parts)
 
+                @override
                 def pack_to(self, dest: BinaryIO) -> int:
-                    raw = super().pack()
-                    return (
-                        self._LENGTH_TYPE(super().packed_size()).pack_to(dest)
-                        + super().pack_to(dest))
+                    return Spec.pack_to(self, dest)
 
+                @override
                 @classmethod
                 def unpack(cls, raw: bytes) -> Self:
-                    lenlen = cls._LENGTH_TYPE._BYTE_LENGTH
-                    if len(raw) < lenlen:
-                        raise ValueError
-                    length = cls._LENGTH_TYPE.unpack(raw[:lenlen])
-                    if len(raw) != lenlen + length:
-                        raise ValueError
-                    return super().unpack(raw[lenlen:])
+                    offset = 0
+                    for LT in cls._LENGTH_TYPES:
+                        lenlen = LT._BYTE_LENGTH
+                        if len(raw) < offset + lenlen:
+                            raise ValueError
+                        length = LT.unpack(raw[offset:offset+lenlen])
+                        if len(raw) != offset + lenlen + length:
+                            raise ValueError
+                        offset += lenlen
+                    return super().unpack(raw[offset:])
 
                 @classmethod
                 def unpack_from(cls, src: BinaryIO, limit: int|None = None) -> tuple[Self, int]:
-                    length, lenlen = cls._LENGTH_TYPE.unpack_from(src, limit)
-                    if limit is not None and limit - lenlen < length:
-                        raise ValueError
+                    length: int|None = None
+                    readlen = 0
+                    for LT in cls._LENGTH_TYPES:
+                        len2, lenlen = LT.unpack_from(src, limit)
+                        if length is not None and length != lenlen + len2:
+                            raise ValueError
+                        length = len2
+                        readlen += lenlen
+                        if limit is not None:
+                            limit -= lenlen
+                            if limit < length:
+                                raise ValueError
+                    assert length is not None
                     raw = force_read(src, length)
-                    return super().unpack(raw), lenlen + length
+                    return super().unpack(raw), readlen + length
             """))
 
     @override
-    def prereqs(self) -> Iterable[tuple[Nested, str|None]]:
-        yield (self.inner_type, None)
+    def prereqs(self, names: Names) -> Iterable[Nested]:
+        yield self.inner_type
 
     @override
-    def _name_hint(self, pstubs: Iterable[str]) -> str:
-        [istub] = pstubs
-        return f'Bounded{istub}'
+    def _name_hint(self, names: Names) -> NameRank:
+        return NameRank(f'Bounded{names.current_stub(self.inner_type)}', 80)
 
 @flyweight
 @dataclass(frozen=True)
-class Bounded(GenSpec):
-    bit_length: int
+class _Bounded(GenSpec):
+    length_types: tuple[Uint,...]
     inner_type: Nested
-
-    @property
-    def _length_type(self) -> Uint:
-        return Uint(self.bit_length)
 
     @property
     def _parent(self) -> _BoundedX:
         return _BoundedX(self.inner_type)
 
-    def __post_init__(self) -> None:
-        assert self.bit_length >= 0 and self.bit_length % 8 == 0
-
     @override
-    def generate(self, dest: TextIO, names: Names) -> None:
+    def generate(self, dest: TextIO, names: dict[GenSpec,str]) -> None:
         dest.write(dedent(f"""\
             class {names[self]}({names[self._parent]}):
-                _LENGTH_TYPE = {names[self._length_type]}
+                _LENGTH_TYPES = {write_tuple(names[lt] for lt in self.length_types)}
             """))
 
     @override
-    def prereqs(self) -> Iterable[tuple[Nested, str|None]]:
-        yield (self._length_type, None)
-        yield (self._parent, None)
+    def prereqs(self, names: Names) -> Iterable[Nested]:
+        yield self._parent
+        yield from self.length_types
 
     @override
-    def _name_hint(self, pstubs: Iterable[str]) -> str:
-        [_, pstub] = pstubs
+    def _name_hint(self, names: Names) -> NameRank:
+        pstub = names.current_stub(self._parent)
         istub = pstub[7:] if pstub.startswith('Bounded') else pstub
-        return f'{istub}{self.bit_length}'
+        suffix = '_'.join(str(lt.bit_length) for lt in self.length_types)
+        return NameRank(f'{istub}{suffix}', 80)
+
+def Bounded(bit_length: int, inner_type: Nested) -> _Bounded:
+    lt = Uint(bit_length)
+    if isinstance(inner_type, _Bounded):
+        return _Bounded((lt,) + inner_type.length_types,
+                        inner_type.inner_type)
+    else:
+        return _Bounded((lt,), inner_type)
 
 @flyweight
 @dataclass(frozen=True)
@@ -311,45 +368,46 @@ class Sequence(GenSpec):
     item_type: Nested
 
     @override
-    def generate(self, dest: TextIO, names: Names) -> None:
-        nn = names[self.item_type]
+    def generate(self, dest: TextIO, names: dict[GenSpec,str]) -> None:
+        nn = get_name(names, self.item_type)
         dest.write(dedent(f"""\
             class {names[self]}(spec_static._Sequence[{nn}]):
                 _ITEM_TYPE = {nn}
             """))
 
     @override
-    def prereqs(self) -> Iterable[tuple[Nested, str|None]]:
-        yield (self.item_type, None)
+    def prereqs(self, names: Names) -> Iterable[Nested]:
+        yield self.item_type
 
     @override
-    def _name_hint(self, pstubs: Iterable[str]) -> str:
-        [istub] = pstubs
-        return f'{istub}Seq'
+    def _name_hint(self, names: Names) -> NameRank:
+        return NameRank(f'{names.current_stub(self.item_type)}Seq', 80)
 
 @dataclass(frozen=True)
 class _Struct(GenSpec):
     schema: tuple[tuple[str, Nested], ...]
 
     @override
-    def generate(self, dest: TextIO, names: Names) -> None:
+    def generate(self, dest: TextIO, names: dict[GenSpec,str]) -> None:
         dest.write(dedent(f"""\
             @dataclass(frozen=True)
             class {names[self]}(spec_static._StructBase):
                 _member_names: ClassVar[tuple[str,...]] = ({','.join(repr(name) for (name,_) in self.schema)},)
-                _member_types: ClassVar[tuple[type[FullSpec],...]] = ({','.join(names[typ] for _,typ in self.schema)},)
+                _member_types: ClassVar[tuple[type[FullSpec],...]] = ({','.join(get_name(names,typ) for _,typ in self.schema)},)
             """))
         for name,typ in self.schema:
-            dest.write(f'    {name}: {names[typ]}\n')
+            dest.write(f'    {name}: {get_name(names,typ)}\n')
 
     @override
-    def prereqs(self) -> Iterable[tuple[Nested, str|None]]:
+    def prereqs(self, names: Names) -> Iterable[Nested]:
         for name,typ in self.schema:
-            yield (typ, name)
+            if isinstance(typ, GenSpec):
+                names.suggest(typ, NameRank(name, 20))
+            yield typ
 
     @override
-    def _name_hint(self, pstubs: Iterable[str]) -> str:
-        return 'Struct'
+    def _name_hint(self, names: Names) -> NameRank:
+        return NameRank('Struct', 10)
 
 def Struct(**kwargs: Nested) -> _Struct:
     return _Struct(tuple(kwargs.items()))
@@ -362,9 +420,9 @@ class _SelecteeGen(GenSpec):
     data_type: Nested
 
     @override
-    def generate(self, dest: TextIO, names: Names) -> None:
-        sname = names[self.select_type]
-        dname = names[self.data_type]
+    def generate(self, dest: TextIO, names: dict[GenSpec,str]) -> None:
+        sname = get_name(names, self.select_type)
+        dname = get_name(names, self.data_type)
         dest.write(dedent(f"""\
             class {names[self]}(spec_static._Selectee[{sname}, {dname}]):
                 _SELECTOR = {sname}.{self.selection}
@@ -372,13 +430,13 @@ class _SelecteeGen(GenSpec):
             """))
 
     @override
-    def prereqs(self) -> Iterable[tuple[Nested, str|None]]:
-        yield (self.select_type, None)
-        yield (self.data_type, None)
+    def prereqs(self, names: Names) -> Iterable[Nested]:
+        yield self.select_type
+        yield self.data_type
 
     @override
-    def _name_hint(self, pstubs: Iterable[str]) -> str:
-        return f'{self.selection}Selection'
+    def _name_hint(self, names: Names) -> NameRank:
+        return NameRank(f'{self.selection}Selection', 30)
 
 class _SelectActual(GenSpec):
     def __init__(self, select_type: Nested, bit_length: int|None, **kwargs: Nested) -> None:
@@ -390,8 +448,8 @@ class _SelectActual(GenSpec):
             for (key,value) in kwargs.items()}
 
     @override
-    def generate(self, dest: TextIO, names: Names) -> None:
-        sname = names[self._select_type]
+    def generate(self, dest: TextIO, names: dict[GenSpec,str]) -> None:
+        sname = get_name(names, self._select_type)
         tname = f'{names[self]}Variants'
         dest.write(dedent(f"""\
             type {tname} = {' | '.join(str(names[s]) for s in self._selectees.values())}
@@ -413,15 +471,19 @@ class _SelectActual(GenSpec):
             """)))
 
     @override
-    def prereqs(self) -> Iterable[tuple[Nested, str|None]]:
-        yield (self._select_type, None)
-        for s in self._selectees.values():
-            yield (s, None) #TODO fill something in here for a name hint?? XXX
+    def prereqs(self, names: Names) -> Iterable[Nested]:
+        yield self._select_type
+        for (name,sgen) in self._selectees.items():
+            names.suggest(sgen, NameRank(name, 40))
+            yield sgen
 
     @override
-    def _name_hint(self, pstubs: Iterable[str]) -> str:
-        sname = next(iter(pstubs))
-        return sname[:-4] if sname.endswith('Type') else f'{sname}Obj'
+    def _name_hint(self, names: Names) -> NameRank:
+        sname = names.current_stub(self._select_type)
+        return NameRank(sname[:-4]
+                        if sname.endswith('Type')
+                        else f'{sname}Obj',
+                        60)
 
 @dataclass
 class Select:
@@ -436,6 +498,7 @@ class Select:
 class SourceGen:
     dest: TextIO
     ns: Names
+    names: dict[GenSpec,str]
     _written: set[GenSpec] = field(default_factory=set)
 
     def __post_init__(self) -> None:
@@ -451,12 +514,12 @@ class SourceGen:
 
     def write(self, spec: GenSpec) -> None:
         if spec not in self._written:
-            for (pre, _) in spec.prereqs():
+            for pre in spec.prereqs(self.ns):
                 if isinstance(pre, GenSpec):
                     self.write(pre)
             self._written.add(spec)
             self.dest.write('\n')
-            spec.generate(self.dest, self.ns)
+            spec.generate(self.dest, self.names)
 
     def write_all(self, specs: Iterable[GenSpec]) -> None:
         for spec in specs:
@@ -465,12 +528,11 @@ class SourceGen:
 
 def generate_specs(dest: TextIO, **kwargs: GenSpec) -> None:
     ns = Names()
-    togen: list[GenSpec] = []
 
     for (name, spec) in kwargs.items():
-        ns.register(spec, name)
-        togen.append(spec)
+        ns.register(spec)
+        ns.suggest(spec, NameRank(name, FORCE_RANK))
 
-    ns.assign()
+    names = ns.assign()
 
-    SourceGen(dest, ns).write_all(togen)
+    SourceGen(dest, ns, names).write_all(ns.order())
