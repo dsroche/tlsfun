@@ -1,17 +1,19 @@
 #!/usr/bin/env python3
 
-from spec import kwdict
+from util import kwdict
+from spec import (
+    Raw,
+    String,
+    Empty,
+)
 from spec_gen import (
     GenSpec,
     EnumSpec,
     Struct,
     Uint,
-    Raw,
-    String,
     Sequence,
     Bounded,
     Select,
-    Empty,
     Wrap,
     FixRaw,
     generate_specs,

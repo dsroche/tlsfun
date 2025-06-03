@@ -9,9 +9,6 @@ from textwrap import dedent
 
 type Json = int | float | str | bool | None | list[Json] | dict[str, Json]
 
-def kwdict[T](**kwargs: T) -> dict[str, T]:
-    return kwargs
-
 def force_read(src: BinaryIO, size: int) -> bytes:
     got = src.read(size)
     if len(got) != size:

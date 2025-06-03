@@ -1,67 +1,18 @@
-from typing import Self, BinaryIO, TextIO, get_args, Iterable, Protocol, Any, dataclass_transform, ClassVar, override
+from typing import Self, BinaryIO, TextIO, Any, override
+from collections.abc import Iterable
 from dataclasses import dataclass, field
-import dataclasses
 from collections import Counter
-from io import BytesIO
-from enum import IntEnum
-import functools
 from textwrap import indent, dedent
-import spec
-from spec import *
+from util import (
+    flyweight,
+    write_tuple,
+    exact_lstrip,
+    exact_rstrip,
+    camel_case,
+)
+from spec import Spec
 
 type Nested = 'GenSpec' | type[Spec] | str
-
-def flyweight[T](cls: type[T]) -> type[T]:
-    """Decorator to create only one instance of the class with the same init() arguments."""
-    original_new = cls.__new__
-    new_args = original_new is not object.__new__
-
-    instances: dict[tuple[type[T], tuple[Any,...], frozenset[tuple[str,Any]]], T] = {}
-
-    @functools.wraps(original_new)
-    def __new__(cls2: type[T], *args: Any, **kwargs: Any) -> T:
-        key = (cls2, args, frozenset(kwargs.items()))
-        try:
-            return instances[key]
-        except KeyError:
-            pass
-        if new_args:
-            instance = original_new(cls2, *args, **kwargs)
-        else:
-            instance = original_new(cls2)
-        instances[key] = instance
-        return instance
-
-    def get_instances(cls2: type[T]) -> Iterable[T]:
-        return instances.values()
-
-    setattr(cls, '__new__', __new__)
-    setattr(cls, 'get_instances', classmethod(get_instances))
-
-    return cls
-
-def write_tuple(items: Iterable[str]) -> str:
-    it = iter(items)
-    try:
-        first = next(it)
-    except StopIteration:
-        return '()'
-    return f"({first}, {', '.join(it)})"
-
-def exact_lstrip(orig: str, prefix: str) -> str:
-    if orig.startswith(prefix):
-        return orig[len(prefix):]
-    else:
-        return orig
-
-def exact_rstrip(orig: str, suffix: str, new_suffix: str = '') -> str:
-    if orig.endswith(suffix):
-        return orig[:-len(suffix)]
-    else:
-        return orig + new_suffix
-
-def camel_case(orig: str) -> str:
-    return orig.replace('_',' ').title().replace(' ','')
 
 FORCE_RANK = float('inf')
 
