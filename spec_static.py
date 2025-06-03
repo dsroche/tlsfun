@@ -49,6 +49,50 @@ class FullSpec(Spec):
     def unpack_from(cls, src: BinaryIO, limit: int|None = None) -> tuple[Self, int]:
         raise NotImplementedError
 
+class _Wrapper[T: FullSpec](FullSpec):
+    _DATA_TYPE: type[T]
+
+    def __init__(self, data: T) -> None:
+        if not isinstance(data, self._DATA_TYPE):
+            raise ValueError
+        self._data = data
+
+    @property
+    def data(self) -> T:
+        return self._data
+
+    @override
+    def jsonify(self) -> Json:
+        return self.data.jsonify()
+
+    @override
+    @classmethod
+    def from_json(cls, obj: Json) -> Self:
+        return cls(data = cls._DATA_TYPE.from_json(obj))
+
+    @override
+    def packed_size(self) -> int:
+        return self.data.packed_size()
+
+    @override
+    def pack(self) -> bytes:
+        return self.data.pack()
+
+    @override
+    def pack_to(self, dest: BinaryIO) -> int:
+        return self.data.pack_to(dest)
+
+    @override
+    @classmethod
+    def unpack(cls, raw: bytes) -> Self:
+        return cls(data = cls._DATA_TYPE.unpack(raw))
+
+    @override
+    @classmethod
+    def unpack_from(cls, src: BinaryIO, limit: int|None = None) -> tuple[Self, int]:
+        data, size = cls._DATA_TYPE.unpack_from(src, limit)
+        return cls(data=data), size
+
 class _Fixed(FullSpec):
     _BYTE_LENGTH: int
 
@@ -181,6 +225,14 @@ class Raw(Spec, bytes):
     @classmethod
     def unpack(cls, raw: bytes) -> Self:
         return cls(raw)
+
+class _FixRaw(Raw, _Fixed):
+    def __new__(cls, *args: Any, **kwargs: Any) -> Self:
+        return Raw.__new__(cls, *args, **kwargs)
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        if len(self) != self._BYTE_LENGTH:
+            raise ValueError
 
 class _Sequence[T: FullSpec](Spec, tuple[T,...]):
     _ITEM_TYPE: type[T]

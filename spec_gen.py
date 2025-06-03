@@ -261,115 +261,94 @@ specs: dict[str, GenSpec] = kwdict(
             ),
     ),
 
+    ECHConfigVersion = EnumSpec(16)(
+        DRAFT24 = 0xfe0d,
+    ),
+
+    ECHConfig = Select('ECHConfigVersion', 16)(
+        DRAFT24 = Struct(
+            key_config = Struct (
+                config_id     = Uint(8),
+                kem_id        = 'HpkeKemId',
+                public_key    = Bounded(16, Raw),
+                cipher_suites = Bounded(16, Sequence('HpkeSymmetricCipherSuite')),
+            ),
+            maximum_name_length = Uint(8),
+            public_name         = Bounded(8, String),
+            extensions          = Bounded(16, Sequence(Struct(
+                typ  = 'ECHConfigExtensionType',
+                data = Bounded(16, Raw),
+            ))),
+        ),
+    ),
+
+    ECHConfigList = Wrap(Bounded(16, Sequence('ECHConfig'))),
+
+    ServerExtension = Select('ExtensionType', 16)(
+        SERVER_NAME =
+            Sequence(Bounded(16, Struct(
+                name_type = Uint(8),
+                host_name = Bounded(16, String),
+            ))),
+        SUPPORTED_GROUPS =
+            Bounded(16, Sequence('NamedGroup')),
+        SIGNATURE_ALGORITHMS =
+            Bounded(16, Sequence('SignatureScheme')),
+        SUPPORTED_VERSIONS =
+            Bounded(8, Sequence('Version')),
+        KEY_SHARE = 'KeyShareEntry',
+        TICKET_REQUEST = Struct(expected_count = Uint(8)),
+        PRE_SHARED_KEY = Uint(16),
+        ENCRYPTED_CLIENT_HELLO = 'ECHConfigList',
+    ),
+
+    ServerExtensionList = Wrap(Bounded(16, Sequence('ServerExtension'))),
+
+    Ticket = Struct(
+        ticket_lifetime = Uint(32),
+        ticket_age_add  = Uint(32),
+        ticket_nonce    = Bounded(8, Raw),
+        ticket          = Bounded(16, Raw),
+        extensions      = 'ServerExtensionList',
+    ),
+
+    Handshake = Select('HandshakeType', 24)(
+        CLIENT_HELLO = Struct(
+            legacy_version     = 'Version', # FIXME Version.TLS_1_2.as_const(),
+            client_random      = FixRaw(32),
+            session_id         = Bounded(8, Raw),
+            ciphers            = Bounded(16, Sequence('CipherSuite')),
+            legacy_compression = Bounded(8, Sequence(Uint(8))), # FIXME .const([0]),
+            extensions         = Bounded(16, Sequence('ClientExtension')),
+        ),
+        SERVER_HELLO = Struct(
+            legacy_version     = 'Version', # FIXME .TLS_1_2.as_const(),
+            server_random      = FixRaw(32),
+            session_id         = Bounded(8, Raw),
+            cipher_suite       = 'CipherSuite',
+            legacy_compression = Uint(8), # FIXME .const(0),
+            extensions         = 'ServerExtensionList',
+        ),
+        ENCRYPTED_EXTENSIONS = 'ServerExtensionList',
+        CERTIFICATE = Struct(
+            certificate_request_context = Bounded(8, Raw),
+            certificate_list = Bounded(24, Sequence(Struct(
+                cert_data  = Bounded(24, Raw),
+                extensions = Bounded(16, Raw),
+            ))),
+        ),
+        CERTIFICATE_VERIFY = Struct(
+            algorithm = 'SignatureScheme',
+            signature = Bounded(16, Raw),
+        ),
+        FINISHED = Raw,
+        NEW_SESSION_TICKET = 'Ticket',
+    ),
+
+
     comment = Comment("""
 
 
-common_extensions = {
-ExtensionType.SERVER_NAME
-: Sequence(Bounded(2, Struct(
-    name_type = Integer(1).const(0),
-    host_name = Bounded(2, String),
-))),
-ExtensionType.SUPPORTED_GROUPS
-: Bounded(2, Sequence(NamedGroup)),
-ExtensionType.SIGNATURE_ALGORITHMS
-: Bounded(2, Sequence(SignatureScheme)),
-ExtensionType.SUPPORTED_VERSIONS
-: Bounded(1, Version.TLS_1_3.as_const()),
-}
-
-
-
-ECHConfig = Select(
-version = Integer(2),
-contents = SelectBounded(2, {
-0xfe0d: Struct(
-    key_config = Struct (
-        config_id     = Integer(1),
-        kem_id        = HpkeKemId,
-        public_key    = Bounded(2, Raw),
-        cipher_suites = Bounded(2, Sequence(HpkeSymmetricCipherSuite)),
-    ),
-    maximum_name_length = Integer(1),
-    public_name         = Bounded(1, String),
-    extensions          = Bounded(2, Sequence(Struct(
-        typ  = ECHConfigExtensionType,
-        data = Bounded(2, Raw),
-    ))),
-),
-}),
-)
-
-ECHConfigList = Bounded(2, Sequence(ECHConfig))
-
-ServerExtension = Select(
-typ = ExtensionType,
-data = SelectBounded(2, common_extensions | {
-ExtensionType.SUPPORTED_VERSIONS
-    : Version.TLS_1_3.as_const(),
-ExtensionType.KEY_SHARE
-    : KeyShareEntry,
-ExtensionType.TICKET_REQUEST
-    : Struct(expected_count = Integer(1)),
-ExtensionType.PRE_SHARED_KEY
-    : Integer(2),
-ExtensionType.ENCRYPTED_CLIENT_HELLO
-    : ECHConfigList,
-})
-)
-
-ServerExtensionList = Bounded(2, Sequence(ServerExtension))
-
-Ticket = Struct(
-ticket_lifetime = Integer(4),
-ticket_age_add  = Integer(4),
-ticket_nonce    = Bounded(1, Raw),
-ticket          = Bounded(2, Raw),
-extensions      = ServerExtensionList,
-)
-
-Handshake = Select(
-typ = HandshakeType,
-body = SelectBounded(3, {
-HandshakeType.CLIENT_HELLO
-    : Struct(
-        legacy_version     = Version.TLS_1_2.as_const(),
-        client_random      = Fix(32, Raw),
-        session_id         = Bounded(1, Raw),
-        ciphers            = Bounded(2, Sequence(CipherSuite)),
-        legacy_compression = Bounded(1, Sequence(Integer(1))).const([0]),
-        extensions         = Bounded(2, Sequence(ClientExtension)),
-    ),
-HandshakeType.SERVER_HELLO
-    : Struct(
-        legacy_version     = Version.TLS_1_2.as_const(),
-        server_random      = Fix(32, Raw),
-        session_id         = Bounded(1, Raw),
-        cipher_suite       = CipherSuite,
-        legacy_compression = Integer(1).const(0),
-        extensions         = ServerExtensionList,
-    ),
-HandshakeType.ENCRYPTED_EXTENSIONS
-    : ServerExtensionList,
-HandshakeType.CERTIFICATE
-    : Struct(
-        certificate_request_context = Bounded(1, Raw),
-        certificate_list = Bounded(3, Sequence(Struct(
-            cert_data  = Bounded(3, Raw),
-            extensions = Bounded(2, Raw),
-        ))),
-    ),
-HandshakeType.CERTIFICATE_VERIFY
-    : Struct(
-        algorithm = SignatureScheme,
-        signature = Bounded(2, Raw),
-    ),
-HandshakeType.FINISHED
-    : Raw,
-HandshakeType.NEW_SESSION_TICKET
-    : Ticket,
-})
-)
 
 
 class _InnerPlaintext(Struct):

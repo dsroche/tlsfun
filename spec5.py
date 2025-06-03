@@ -125,6 +125,32 @@ def maybe_suggest(typ: Nested, name: str, rank: float) -> bool:
 
 @flyweight
 @dataclass(frozen=True)
+class Wrap(GenSpec):
+    inner_type: Nested
+
+    def __post_init__(self) -> None:
+        self.update_stub(f'Wrap{get_stub(self.inner_type)}', 30)
+
+    def suggest(self, name: str, rank: float) -> bool:
+        if rank == FORCE_RANK:
+            return self.update_stub(name, rank)
+        elif maybe_suggest(self.inner_type, name, min(rank, 90)):
+            return self.update_stub(f'Wrap{get_stub(self.inner_type)}', 30)
+        else:
+            return False
+
+    def generate(self, dest: TextIO, names: dict['GenSpec',str]) -> None:
+        dest.write(dedent(f"""\
+            class {names[self]}(spec_static._Wrapper[{get_name(names, self.inner_type)}]):
+                _DATA_TYPE = {get_name(names, self.inner_type)}
+            """))
+
+    def prereqs(self) -> Iterable[Nested]:
+        yield self.inner_type
+
+
+@flyweight
+@dataclass(frozen=True)
 class Uint(GenSpec):
     bit_length: int
 
@@ -154,6 +180,23 @@ class _FixedX(GenSpec):
             class {names[self]}(spec_static._Fixed):
                 _BYTE_LENGTH = {self.bit_length // 8}
             """))
+
+@flyweight
+@dataclass(frozen=True)
+class FixRaw(GenSpec):
+    byte_length: int
+
+    def __post_init__(self) -> None:
+        assert self.byte_length >= 0
+        self.update_stub(f'F{self.byte_length}Raw', 100)
+
+    @override
+    def generate(self, dest: TextIO, names: dict[GenSpec,str]) -> None:
+        dest.write(dedent(f"""\
+            class {names[self]}(spec_static._FixRaw):
+                _BYTE_LENGTH = {self.byte_length}
+            """))
+
 
 @flyweight
 @dataclass(frozen=True)
@@ -327,21 +370,20 @@ class _Bounded(GenSpec):
     def _parent(self) -> _BoundedX:
         return _BoundedX(self.inner_type)
 
-    def _name_suggestion(self) -> str:
+    def _restub(self) -> bool:
         pstub = exact_lstrip(self._parent.stub, 'Bounded')
         prefix = ''.join(f'B{lt.bit_length}' for lt in self.length_types)
-        print("COMPUTING BOUNDED NAME SUGGESTION", self._parent.stub, prefix, pstub)
-        return f'{prefix}{pstub}'
+        return self.update_stub(f'{prefix}{pstub}', 70)
 
     def __post_init__(self) -> None:
-        self.update_stub(self._name_suggestion(), 70)
+        self._restub()
 
     @override
     def suggest(self, name: str, rank: float) -> bool:
         if rank == FORCE_RANK:
             return self.update_stub(name, rank)
         elif self._parent.suggest(name, min(rank, 90)):
-            return self.update_stub(self._name_suggestion(), 70)
+            return self._restub()
         else:
             return False
 
