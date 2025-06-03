@@ -7,7 +7,7 @@ class Comment(GenSpec): #TODO dumb
     def __init__(self, *args: str) -> None:
         pass
     @override
-    def generate(self, dest: TextIO) -> None:
+    def generate(self, dest: TextIO, names: Names) -> None:
         pass
 
 def kwdict[T](**kwargs: T) -> dict[str, T]:
@@ -222,23 +222,22 @@ specs: dict[str, GenSpec] = kwdict(
         aead_id = 'HpkeAeadId',
     ),
 
-    ClientExtension = Select('ExtensionType')(
-        #TODO FIXME 16 bit bounded
-        SEVER_NAME =
+    ClientExtension = Select('ExtensionType', 16)(
+        SERVER_NAME =
             Sequence(Bounded(16, Struct(
                 name_type = Uint(8), # TODO FIXME .const(0),
                 host_name = Bounded(16, String),
             ))),
         SUPPORTED_GROUPS =
-            Bounded(16, Sequence(NamedGroup)),
+            Bounded(16, Sequence('NamedGroup')),
         SIGNATURE_ALGORITHMS =
-            Bounded(16, Sequence(SignatureScheme)),
+            Bounded(16, Sequence('SignatureScheme')),
         SUPPORTED_VERSIONS =
-            Bounded(8, Sequence(Version)),
+            Bounded(8, Sequence('Version')),
         PSK_KEY_EXCHANGE_MODES =
-            Bounded(8, Sequence(PskKeyExchangeMode)),
+            Bounded(8, Sequence('PskKeyExchangeMode')),
         KEY_SHARE =
-            Bounded(16, Sequence(KeyShareEntry)),
+            Bounded(16, Sequence('KeyShareEntry')),
         TICKET_REQUEST =
             Struct(
                 new_session_count = Uint(8),
@@ -246,21 +245,19 @@ specs: dict[str, GenSpec] = kwdict(
             ),
         PRE_SHARED_KEY =
             Struct(
-                identities = Bounded(16, Sequence(PskIdentity)),
-                binders    = PskBinders,
+                identities = Bounded(16, Sequence('PskIdentity')),
+                binders    = 'PskBinders',
             ),
         ENCRYPTED_CLIENT_HELLO =
-            Select(
-                typ  = ECHClientHelloType,
-                data = {
-                    ECHClientHelloType.OUTER: Struct(
-                        cipher_suite = HpkeSymmetricCipherSuite,
+            Select('ECHClientHelloType')(
+                OUTER =
+                    Struct(
+                        cipher_suite = 'HpkeSymmetricCipherSuite',
                         config_id    = Uint(8),
                         enc          = Bounded(16, Raw),
                         payload      = Bounded(16, Raw),
                     ),
-                    ECHClientHelloType.INNER: Padding(0),
-                }.__getitem__,
+                INNER = Empty,
             ),
     ),
 

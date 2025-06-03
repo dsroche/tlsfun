@@ -62,6 +62,40 @@ class _Fixed(FullSpec):
         raw = force_read(src, cls._BYTE_LENGTH)
         return cls.unpack(raw), cls._BYTE_LENGTH
 
+class Empty(_Fixed):
+    _BYTE_LENGTH: int = 0
+
+    @override
+    def jsonify(self) -> Json:
+        return None
+
+    @override
+    @classmethod
+    def from_json(cls, obj: Json) -> Self:
+        if obj is not None:
+            raise ValueError
+        return cls()
+
+    @override
+    def pack(self) -> bytes:
+        return b''
+
+    @override
+    def pack_to(self, dest: BinaryIO) -> int:
+        return 0
+
+    @override
+    @classmethod
+    def unpack(cls, raw: bytes) -> Self:
+        if len(raw):
+            raise ValueError
+        return cls()
+
+    @override
+    @classmethod
+    def unpack_from(cls, src: BinaryIO, limit: int|None = None) -> tuple[Self, int]:
+        return (cls(), 0)
+
 class _Integral(_Fixed, int):
     def __new__(cls, value: int) -> Self:
         return int.__new__(cls, value)
