@@ -2,10 +2,10 @@
 
 from typing import Iterable
 from io import BytesIO
-from spec_static import Spec, FullSpec, Json
-from spec6 import *
+import spec
+from spec import Spec, FullSpec, Json
+from tls13_spec import *
 
-import spec_static
 
 def check[T](a: T, b: T) -> None:
     if isinstance(a, bytes) and isinstance(b, bytes):

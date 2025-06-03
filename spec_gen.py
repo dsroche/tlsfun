@@ -1,484 +1,679 @@
-#!/usr/bin/env python3
+from typing import Self, BinaryIO, TextIO, get_args, Iterable, Protocol, Any, dataclass_transform, ClassVar, override
+from dataclasses import dataclass, field
+import dataclasses
+from collections import Counter
+from io import BytesIO
+from enum import IntEnum
+import functools
+from textwrap import indent, dedent
+import spec
+from spec import *
 
-from spec5 import *
+type Nested = 'GenSpec' | type[Spec] | str
 
-from typing import override, TextIO
-class Comment(GenSpec): #TODO dumb
-    def __init__(self, *args: str) -> None:
-        super().__init__()
-        pass
-    @override
+def flyweight[T](cls: type[T]) -> type[T]:
+    """Decorator to create only one instance of the class with the same init() arguments."""
+    original_new = cls.__new__
+    new_args = original_new is not object.__new__
+
+    instances: dict[tuple[type[T], tuple[Any,...], frozenset[tuple[str,Any]]], T] = {}
+
+    @functools.wraps(original_new)
+    def __new__(cls2: type[T], *args: Any, **kwargs: Any) -> T:
+        key = (cls2, args, frozenset(kwargs.items()))
+        try:
+            return instances[key]
+        except KeyError:
+            pass
+        if new_args:
+            instance = original_new(cls2, *args, **kwargs)
+        else:
+            instance = original_new(cls2)
+        instances[key] = instance
+        return instance
+
+    def get_instances(cls2: type[T]) -> Iterable[T]:
+        return instances.values()
+
+    setattr(cls, '__new__', __new__)
+    setattr(cls, 'get_instances', classmethod(get_instances))
+
+    return cls
+
+def write_tuple(items: Iterable[str]) -> str:
+    it = iter(items)
+    try:
+        first = next(it)
+    except StopIteration:
+        return '()'
+    return f"({first}, {', '.join(it)})"
+
+def exact_lstrip(orig: str, prefix: str) -> str:
+    if orig.startswith(prefix):
+        return orig[len(prefix):]
+    else:
+        return orig
+
+def exact_rstrip(orig: str, suffix: str, new_suffix: str = '') -> str:
+    if orig.endswith(suffix):
+        return orig[:-len(suffix)]
+    else:
+        return orig + new_suffix
+
+def camel_case(orig: str) -> str:
+    return orig.replace('_',' ').title().replace(' ','')
+
+FORCE_RANK = float('inf')
+
+@dataclass
+class NameRank:
+    name: str = field(default='Spec')
+    rank: float = field(default=0.0)
+
+    def update(self, name2: str, rank2: float|None = None) -> bool:
+        if rank2 is None:
+            rank2 = self.rank
+        if rank2 >= self.rank:
+            if self.rank == FORCE_RANK and name2 != self.name:
+                raise ValueError(f"can't decide between names {self.name} and {name2} with max rank")
+            self.name = name2
+            self.rank = rank2
+            return True
+        else:
+            return False
+
+@dataclass(frozen=True)
+class GenSpec:
+    _name_stub: NameRank = field(default_factory=NameRank, kw_only=True, hash=False, compare=False)
+
+    @property
+    def stub(self) -> str:
+        return self._name_stub.name
+
+    @property
+    def stub_rank(self) -> float:
+        return self._name_stub.rank
+
+    def update_stub(self, name: str, rank: float) -> bool:
+        return self._name_stub.update(name, rank)
+
+    def suggest(self, name: str, rank: float) -> bool:
+        return self.update_stub(name, rank)
+
     def generate(self, dest: TextIO, names: dict['GenSpec',str]) -> None:
-        pass
+        raise NotImplementedError
 
-def kwdict[T](**kwargs: T) -> dict[str, T]:
-    return kwargs
+    def prereqs(self) -> Iterable[Nested]:
+        return ()
 
-specs: dict[str, GenSpec] = kwdict(
-    ClientState = EnumSpec(8)(
-        # rfc8446#appendix-A.1
-        START         = 0,
-        WAIT_SH       = 1,
-        WAIT_EE       = 2,
-        WAIT_CERT_CR  = 3,
-        WAIT_CERT     = 4,
-        WAIT_CV       = 5,
-        WAIT_FINISHED = 6,
-        CONNECTED     = 7,
-        CLOSED        = 8,
-        ERROR         = 9,
-    ),
-    ServerState = EnumSpec(8)(
-        # rfc8446#appendix-A.2
-        START         = 0,
-        RECVD_CH      = 1,
-        NEGOTIATED    = 2,
-        WAIT_EOED     = 3,
-        WAIT_FLIGHT2  = 4,
-        WAIT_CERT     = 5,
-        WAIT_CV       = 6,
-        WAIT_FINISHED = 7,
-        CONNECTED     = 8,
-    ),
-    ContentType = EnumSpec(8)(
-        INVALID            = 0,
-        CHANGE_CIPHER_SPEC = 20,
-        ALERT              = 21,
-        HANDSHAKE          = 22,
-        APPLICATION_DATA   = 23,
-        HEARTBEAT          = 24,
-    ),
-    HandshakeType = EnumSpec(8)(
-        CLIENT_HELLO         = 1,
-        SERVER_HELLO         = 2,
-        NEW_SESSION_TICKET   = 4,
-        END_OF_EARLY_DATA    = 5,
-        ENCRYPTED_EXTENSIONS = 8,
-        CERTIFICATE          = 11,
-        CERTIFICATE_REQUEST  = 13,
-        CERTIFICATE_VERIFY   = 15,
-        FINISHED             = 20,
-        KEY_UPDATE           = 24,
-        MESSAGE_HASH         = 254,
-    ),
-    ExtensionType = EnumSpec(16, 'UNSUPPORTED')(
-        SERVER_NAME                            = 0,
-        MAX_FRAGMENT_LENGTH                    = 1,
-        STATUS_REQUEST                         = 5,
-        SUPPORTED_GROUPS                       = 10,
-        LEGACY_EC_POINT_FORMATS                = 11,
-        SIGNATURE_ALGORITHMS                   = 13,
-        USE_SRTP                               = 14,
-        HEARTBEAT                              = 15,
-        APPLICATION_LAYER_PROTOCOL_NEGOTIATION = 16,
-        SIGNED_CERTIFICATE_TIMESTAMP           = 18,
-        CLIENT_CERTIFICATE_TYPE                = 19,
-        SERVER_CERTIFICATE_TYPE                = 20,
-        PADDING                                = 21,
-        LEGACY_ENCRYPT_THEN_MAC                = 22,
-        LEGACY_EXTENDED_MASTER_SECRET          = 23,
-        LEGACY_SESSION_TICKET                  = 35,
-        PRE_SHARED_KEY                         = 41,
-        EARLY_DATA                             = 42,
-        SUPPORTED_VERSIONS                     = 43,
-        COOKIE                                 = 44,
-        PSK_KEY_EXCHANGE_MODES                 = 45,
-        CERTIFICATE_AUTHORITIES                = 47,
-        OID_FILTERS                            = 48,
-        POST_HANDSHAKE_AUTH                    = 49,
-        SIGNATURE_ALGORITHMS_CERT              = 50,
-        KEY_SHARE                              = 51,
-        TICKET_REQUEST                         = 58,
-        UNSUPPORTED                            = 2570,
-        ENCRYPTED_CLIENT_HELLO                 = 65037,
-    ),
-    SignatureScheme = EnumSpec(16)(
-        RSA_PKCS1_SHA256       = 0x0401,
-        RSA_PKCS1_SHA384       = 0x0501,
-        RSA_PKCS1_SHA512       = 0x0601,
-        ECDSA_SECP256R1_SHA256 = 0x0403,
-        ECDSA_SECP384R1_SHA384 = 0x0503,
-        ECDSA_SECP521R1_SHA512 = 0x0603,
-        RSA_PSS_RSAE_SHA256    = 0x0804,
-        RSA_PSS_RSAE_SHA384    = 0x0805,
-        RSA_PSS_RSAE_SHA512    = 0x0806,
-        ED25519                = 0x0807,
-        ED448                  = 0x0808,
-        RSA_PSS_PSS_SHA256     = 0x0809,
-        RSA_PSS_PSS_SHA384     = 0x080a,
-        RSA_PSS_PSS_SHA512     = 0x080b,
-        RSA_PKCS1_SHA1         = 0x0201,
-        ECDSA_SHA1             = 0x0203,
-    ),
-    NamedGroup = EnumSpec(16, 'UNSUPPORTED')(
-        SECP256R1   = 0x0017,
-        SECP384R1   = 0x0018,
-        SECP521R1   = 0x0019,
-        X25519      = 0x001d,
-        X448        = 0x001e,
-        FFDHE2048   = 0x0100,
-        FFDHE3072   = 0x0101,
-        FFDHE4096   = 0x0102,
-        FFDHE6144   = 0x0103,
-        FFDHE8192   = 0x0104,
-        UNSUPPORTED = 0xFFFF,
-    ),
-    CipherSuite = EnumSpec(16, 'UNSUPPORTED')(
-        TLS_AES_128_GCM_SHA256                   = 0x1301,
-        TLS_AES_256_GCM_SHA384                   = 0x1302,
-        TLS_CHACHA20_POLY1305_SHA256             = 0x1303,
-        TLS_AES_128_CCM_SHA256                   = 0x1304,
-        TLS_AES_128_CCM_8_SHA256                 = 0x1305,
-        LEGACY_TLS_EMPTY_RENEGOTIATION_INFO_SCSV = 0x00ff,
-        UNSUPPORTED                              = 0x4a4a,
-    ),
-    PskKeyExchangeMode = EnumSpec(8)(
-        PSK_KE     = 0,
-        PSK_DHE_KE = 1,
-    ),
-    CertificateType = EnumSpec(8)(
-        X509         = 0,
-        RawPublicKey = 2,
-    ),
-    Version = EnumSpec(16)(
-        TLS_1_0 = 0x0301,
-        TLS_1_2 = 0x0303,
-        TLS_1_3 = 0x0304,
-    ),
-    AlertLevel = EnumSpec(8)(
-        WARNING = 1,
-        FATAL   = 2,
-    ),
-    AlertDescription = EnumSpec(8)(
-        CLOSE_NOTIFY                        = 0,
-        UNEXPECTED_MESSAGE                  = 10,
-        BAD_RECORD_MAC                      = 20,
-        RECORD_OVERFLOW                     = 22,
-        HANDSHAKE_FAILURE                   = 40,
-        BAD_CERTIFICATE                     = 42,
-        UNSUPPORTED_CERTIFICATE             = 43,
-        CERTIFICATE_REVOKED                 = 44,
-        CERTIFICATE_EXPIRED                 = 45,
-        CERTIFICATE_UNKNOWN                 = 46,
-        ILLEGAL_PARAMETER                   = 47,
-        UNKNOWN_CA                          = 48,
-        ACCESS_DENIED                       = 49,
-        DECODE_ERROR                        = 50,
-        DECRYPT_ERROR                       = 51,
-        PROTOCOL_VERSION                    = 70,
-        INSUFFICIENT_SECURITY               = 71,
-        INTERNAL_ERROR                      = 80,
-        INAPPROPRIATE_FALLBACK              = 86,
-        USER_CANCELED                       = 90,
-        MISSING_EXTENSION                   = 109,
-        UNSUPPORTED_EXTENSION               = 110,
-        UNRECOGNIZED_NAME                   = 112,
-        BAD_CERTIFICATE_STATUS_RESPONSE     = 113,
-        UNKNOWN_PSK_IDENTITY                = 115,
-        CERTIFICATE_REQUIRED                = 116,
-        NO_APPLICATION_PROTOCOL             = 120,
-    ),
-    ECHClientHelloType = EnumSpec(8)(
-        OUTER = 0,
-        INNER = 1,
-    ),
-    ECHConfigExtensionType = EnumSpec(16, 'UNSUPPORTED')(
-        UNSUPPORTED = 0xffff,
-    ),
-    HpkeKemId = EnumSpec(16)(
-        DHKEM_P256_HKDF_SHA256  = 0x0010,
-        DHKEM_P384_HKDF_SHA384  = 0x0011,
-        DHKEM_P521_HKDF_SHA512  = 0x0012,
-        DHKEM_X25519_HKDF_SHA256 = 0x0020,
-        DHKEM_X448_HKDF_SHA512   = 0x0021,
-    ),
-    HpkeKdfId = EnumSpec(16)(
-        HKDF_SHA256 = 0x0001,
-        HKDF_SHA384 = 0x0002,
-        HKDF_SHA512 = 0x0003,
-    ),
-    HpkeAeadId = EnumSpec(16)(
-        AES_128_GCM       = 0x0001,
-        AES_256_GCM       = 0x0002,
-        CHACHA20_POLY1305 = 0x0003,
-    ),
+def get_stub(typ: Nested) -> str:
+    match typ:
+        case GenSpec():
+            return typ.stub
+        case type():
+            return typ.__name__
+        case str():
+            return typ
 
-    HkdfLabel = Struct(
-        length  = Uint(16),
-        label   = Bounded(8, Raw),
-        context = Bounded(8, Raw),
-    ),
-    KeyShareEntry = Struct(
-        group  = 'NamedGroup',
-        pubkey = Bounded(16, Raw),
-    ),
-    PskIdentity = Struct(
-        identity              = Bounded(16, Raw),
-        obfuscated_ticket_age = Uint(32),
-    ),
-    HpkeSymmetricCipherSuite = Struct(
-        kdf_id  = 'HpkeKdfId',
-        aead_id = 'HpkeAeadId',
-    ),
+def maybe_suggest(typ: Nested, name: str, rank: float) -> bool:
+    if isinstance(typ, GenSpec):
+        return typ.suggest(name, rank)
+    elif rank == FORCE_RANK and name != get_stub(typ):
+        raise ValueError(f"Can't force name of {get_stub(typ)} to {name}")
+    else:
+        return False
 
-    ClientExtension = Select('ExtensionType', 16, Raw)(
-        SERVER_NAME =
-            Sequence(Bounded(16, Struct(
-                name_type = Uint(8), # TODO FIXME .const(0),
-                host_name = Bounded(16, String),
-            ))),
-        SUPPORTED_GROUPS =
-            Bounded(16, Sequence('NamedGroup')),
-        SIGNATURE_ALGORITHMS =
-            Bounded(16, Sequence('SignatureScheme')),
-        SUPPORTED_VERSIONS =
-            Bounded(8, Sequence('Version')),
-        PSK_KEY_EXCHANGE_MODES =
-            Bounded(8, Sequence('PskKeyExchangeMode')),
-        KEY_SHARE =
-            Bounded(16, Sequence('KeyShareEntry')),
-        TICKET_REQUEST =
-            Struct(
-                new_session_count = Uint(8),
-                resumption_count  = Uint(8),
-            ),
-        PRE_SHARED_KEY =
-            Struct(
-                identities = Bounded(16, Sequence('PskIdentity')),
-                binders    = Bounded(16, Sequence(Bounded(8, Raw))),
+@flyweight
+@dataclass(frozen=True)
+class Wrap(GenSpec):
+    inner_type: Nested
 
-            ),
-        ENCRYPTED_CLIENT_HELLO =
-            Select('ECHClientHelloType')(
-                OUTER =
-                    Struct(
-                        cipher_suite = 'HpkeSymmetricCipherSuite',
-                        config_id    = Uint(8),
-                        enc          = Bounded(16, Raw),
-                        payload      = Bounded(16, Raw),
-                    ),
-                INNER = Empty,
-            ),
-    ),
+    def __post_init__(self) -> None:
+        self.update_stub(f'Wrap{get_stub(self.inner_type)}', 30)
 
-    ECHConfigVersion = EnumSpec(16)(
-        DRAFT24 = 0xfe0d,
-    ),
+    def suggest(self, name: str, rank: float) -> bool:
+        if rank == FORCE_RANK:
+            return self.update_stub(name, rank)
+        elif maybe_suggest(self.inner_type, name, min(rank, 90)):
+            return self.update_stub(f'Wrap{get_stub(self.inner_type)}', 30)
+        else:
+            return False
 
-    ECHConfig = Select('ECHConfigVersion', 16)(
-        DRAFT24 = Struct(
-            key_config = Struct (
-                config_id     = Uint(8),
-                kem_id        = 'HpkeKemId',
-                public_key    = Bounded(16, Raw),
-                cipher_suites = Bounded(16, Sequence('HpkeSymmetricCipherSuite')),
-            ),
-            maximum_name_length = Uint(8),
-            public_name         = Bounded(8, String),
-            extensions          = Bounded(16, Sequence(Struct(
-                typ  = 'ECHConfigExtensionType',
-                data = Bounded(16, Raw),
-            ))),
-        ),
-    ),
+    def generate(self, dest: TextIO, names: dict['GenSpec',str]) -> None:
+        dest.write(dedent(f"""\
+            class {names[self]}(spec._Wrapper[{get_name(names, self.inner_type)}]):
+                _DATA_TYPE = {get_name(names, self.inner_type)}
+            """))
 
-    ECHConfigList = Wrap(Bounded(16, Sequence('ECHConfig'))),
-
-    ServerExtension = Select('ExtensionType', 16, Raw)(
-        SERVER_NAME =
-            Sequence(Bounded(16, Struct(
-                name_type = Uint(8),
-                host_name = Bounded(16, String),
-            ))),
-        SUPPORTED_GROUPS =
-            Bounded(16, Sequence('NamedGroup')),
-        SIGNATURE_ALGORITHMS =
-            Bounded(16, Sequence('SignatureScheme')),
-        SUPPORTED_VERSIONS =
-            Bounded(8, Sequence('Version')),
-        KEY_SHARE = 'KeyShareEntry',
-        TICKET_REQUEST = Struct(expected_count = Uint(8)),
-        PRE_SHARED_KEY = Uint(16),
-        ENCRYPTED_CLIENT_HELLO = 'ECHConfigList',
-    ),
-
-    ServerExtensionList = Wrap(Bounded(16, Sequence('ServerExtension'))),
-
-    Ticket = Struct(
-        ticket_lifetime = Uint(32),
-        ticket_age_add  = Uint(32),
-        ticket_nonce    = Bounded(8, Raw),
-        ticket          = Bounded(16, Raw),
-        extensions      = 'ServerExtensionList',
-    ),
-
-    Handshake = Select('HandshakeType', 24)(
-        CLIENT_HELLO = Struct(
-            legacy_version     = 'Version', # FIXME Version.TLS_1_2.as_const(),
-            client_random      = FixRaw(32),
-            session_id         = Bounded(8, Raw),
-            ciphers            = Bounded(16, Sequence('CipherSuite')),
-            legacy_compression = Bounded(8, Sequence(Uint(8))), # FIXME .const([0]),
-            extensions         = Bounded(16, Sequence('ClientExtension')),
-        ),
-        SERVER_HELLO = Struct(
-            legacy_version     = 'Version', # FIXME .TLS_1_2.as_const(),
-            server_random      = FixRaw(32),
-            session_id         = Bounded(8, Raw),
-            cipher_suite       = 'CipherSuite',
-            legacy_compression = Uint(8), # FIXME .const(0),
-            extensions         = 'ServerExtensionList',
-        ),
-        ENCRYPTED_EXTENSIONS = 'ServerExtensionList',
-        CERTIFICATE = Struct(
-            certificate_request_context = Bounded(8, Raw),
-            certificate_list = Bounded(24, Sequence(Struct(
-                cert_data  = Bounded(24, Raw),
-                extensions = Bounded(16, Raw),
-            ))),
-        ),
-        CERTIFICATE_VERIFY = Struct(
-            algorithm = 'SignatureScheme',
-            signature = Bounded(16, Raw),
-        ),
-        FINISHED = Raw,
-        NEW_SESSION_TICKET = 'Ticket',
-    ),
-
-    Alert = Struct(
-        level       = 'AlertLevel',
-        description = 'AlertDescription',
-    ),
-
-    RecordHeader = Struct(
-        typ  = 'ContentType',
-        vers = 'Version',
-        size = Uint(16),
-    ),
-
-    Record = Select('ContentType')(
-        CHANGE_CIPHER_SPEC = Struct(
-            version = 'Version', #TODO const TLS_1_2
-            payload = Bounded(16, Raw), #TODO const b'\x01'
-        ),
-        HANDSHAKE = Struct(
-            version = 'Version',
-            payload = Bounded(16, Raw),
-        ),
-        APPLICATION_DATA = Struct(
-            version = 'Version', #TODO const TLS_1_2
-            payload = Bounded(16, Raw),
-        ),
-        ALERT = Struct(
-            version = 'Version',
-            payload = 'Alert',
-        ),
-    ),
+    def prereqs(self) -> Iterable[Nested]:
+        yield self.inner_type
 
 
-    comment = Comment("""
+@flyweight
+@dataclass(frozen=True)
+class Uint(GenSpec):
+    bit_length: int
+
+    def __post_init__(self) -> None:
+        assert self.bit_length >= 0 and self.bit_length % 8 == 0
+        self.suggest(f'Uint{self.bit_length}', 100)
+
+    @override
+    def generate(self, dest: TextIO, names: dict[GenSpec,str]) -> None:
+        dest.write(dedent(f"""\
+            class {names[self]}(spec._Integral):
+                _BYTE_LENGTH = {self.bit_length // 8}
+            """))
+
+@flyweight
+@dataclass(frozen=True)
+class _FixedX(GenSpec):
+    bit_length: int
+
+    def __post_init__(self) -> None:
+        assert self.bit_length >= 0 and self.bit_length % 8 == 0
+        self.suggest(f'Fixed{self.bit_length}', 100)
+
+    @override
+    def generate(self, dest: TextIO, names: dict[GenSpec,str]) -> None:
+        dest.write(dedent(f"""\
+            class {names[self]}(spec._Fixed):
+                _BYTE_LENGTH = {self.bit_length // 8}
+            """))
+
+@flyweight
+@dataclass(frozen=True)
+class FixRaw(GenSpec):
+    byte_length: int
+
+    def __post_init__(self) -> None:
+        assert self.byte_length >= 0
+        self.update_stub(f'F{self.byte_length}Raw', 100)
+
+    @override
+    def generate(self, dest: TextIO, names: dict[GenSpec,str]) -> None:
+        dest.write(dedent(f"""\
+            class {names[self]}(spec._FixRaw):
+                _BYTE_LENGTH = {self.byte_length}
+            """))
 
 
+@flyweight
+@dataclass(frozen=True)
+class _SpecEnumX(GenSpec):
+    bit_length: int
+
+    @property
+    def _parent(self) -> _FixedX:
+        return _FixedX(self.bit_length)
+
+    def __post_init__(self) -> None:
+        self.suggest(f'Enum{self.bit_length}', 100)
+
+    @override
+    def generate(self, dest: TextIO, names: dict[GenSpec,str]) -> None:
+        dest.write(dedent(f"""\
+            class {names[self]}({names[self._parent]}, spec._SpecEnum):
+                def jsonify(self) -> Json:
+                    return self.name
+
+                @classmethod
+                def from_json(cls, obj: Json) -> Self:
+                    if isinstance(obj, int):
+                        return cls(obj)
+                    elif isinstance(obj, str):
+                        return cls[obj]
+                    else:
+                        raise ValueError
+
+                def pack(self) -> bytes:
+                    return self.to_bytes(self._BYTE_LENGTH)
+
+                @classmethod
+                def unpack(cls, raw: bytes) -> Self:
+                    if len(raw) != cls._BYTE_LENGTH:
+                        raise ValueError
+                    return cls(int.from_bytes(raw))
+            """))
+
+    @override
+    def prereqs(self) -> Iterable[Nested]:
+        yield self._parent
 
 
-class _InnerPlaintext(Struct):
-def __init__(self):
-super().__init__(
-    typ     = ContentType,
-    data    = Raw,
-    padding = Fill(),
-)
+@dataclass(frozen=True)
+class _EnumSpec(GenSpec):
+    _parent: _SpecEnumX
+    _missing: str|None
+    _members: tuple[tuple[str, int], ...]
 
-def _pack_to(self, dest, tup):
-for i in [1,0,2]:
-    self._types[i].pack_to(dest, tup[i])
+    def __post_init__(self) -> None:
+        self.suggest('EnumSpec', 5)
 
-def _unpack(self, raw):
-tlen = ContentType._packed_size
-stripped = raw.rstrip(b'\x00')
-if len(stripped) < tlen:
-    raise ParseError("ContentType missing")
-parts = [stripped[-tlen:], stripped[:-tlen], raw[len(stripped):]]
-return self.Tuple(*(typ._unpack(part) for typ,part in zip(self._types, parts)))
+    @override
+    def generate(self, dest: TextIO, names: dict[GenSpec,str]) -> None:
+        dest.write(f"class {names[self]}({names[self._parent]}):\n")
+        for (name, value) in self._members:
+            dest.write(f"    {name} = {value}\n")
+        if self._missing is not None:
+            dest.write(indent(dedent(f"""\
+                @classmethod
+                def _missing_(cls, value: Any) -> Self:
+                    logger.warn(f"WARNING: Unrecognized {{cls.__name__}} value {{value}}")
+                    return cls[{repr(self._missing)}]
+                """), '    '))
 
+    @override
+    def prereqs(self) -> Iterable[Nested]:
+        yield self._parent
 
-InnerPlaintext = _InnerPlaintext()
+@dataclass
+class EnumSpec:
+    bit_length: int
+    missing: str|None = None
 
-
-def _record_body_spec(prefix):
-match prefix:
-case (ContentType.CHANGE_CIPHER_SPEC, Version.TLS_1_2):
-    # will be ignored
-    spec = Raw.const(b'\x01')
-case (ContentType.HANDSHAKE, _):
-    # can't parse as Handshake because HS msgs can be split between records
-    spec = Raw
-case (ContentType.APPLICATION_DATA, Version.TLS_1_2):
-    # ciphertext
-    spec = Raw
-case (ContentType.ALERT, _):
-    spec = Alert
-case _:
-    raise ParseError(f"unsupported record prefix {prefix}")
-return Bounded(2, spec)
-
-Record = Select(
-prefix = Struct(
-typ = ContentType,
-vers = Version,
-),
-payload = _record_body_spec
-)
+    def __call__(self, **kwargs: int) -> _EnumSpec:
+        return _EnumSpec(
+            _parent = _SpecEnumX(self.bit_length),
+            _missing = self.missing,
+            _members = tuple(kwargs.items()),
+        )
 
 
-    """),
+@flyweight
+@dataclass(frozen=True)
+class _BoundedX(GenSpec):
+    inner_type: Nested
+
+    def __post_init__(self) -> None:
+        self.update_stub(f'Bounded{get_stub(self.inner_type)}', 70)
+
+    @override
+    def suggest(self, name: str, rank: float) -> bool:
+        if rank == FORCE_RANK:
+            return self.update_stub(name, rank)
+        elif maybe_suggest(self.inner_type, name, min(90, rank)):
+            return self.update_stub(f'Bounded{get_stub(self.inner_type)}', 70)
+        else:
+            return False
+
+    @override
+    def generate(self, dest: TextIO, names: dict[GenSpec,str]) -> None:
+        nn = get_name(names, self.inner_type)
+        dest.write(dedent(f"""\
+            class {names[self]}({nn}, FullSpec):
+                _LENGTH_TYPES: tuple[type[spec._Integral],...]
+
+                @override
+                def packed_size(self) -> int:
+                    return sum(LT._BYTE_LENGTH for LT in self._LENGTH_TYPES) + super().packed_size()
+
+                @override
+                def pack(self) -> bytes:
+                    raw = super().pack()
+                    length = len(raw)
+                    parts = [raw]
+                    for LT in reversed(self._LENGTH_TYPES):
+                        parts.append(LT(length).pack())
+                        length += LT._BYTE_LENGTH
+                    parts.reverse()
+                    return b''.join(parts)
+
+                @override
+                def pack_to(self, dest: BinaryIO) -> int:
+                    return Spec.pack_to(self, dest)
+
+                @override
+                @classmethod
+                def unpack(cls, raw: bytes) -> Self:
+                    offset = 0
+                    for LT in cls._LENGTH_TYPES:
+                        lenlen = LT._BYTE_LENGTH
+                        if len(raw) < offset + lenlen:
+                            raise ValueError
+                        length = LT.unpack(raw[offset:offset+lenlen])
+                        if len(raw) != offset + lenlen + length:
+                            raise ValueError
+                        offset += lenlen
+                    return super().unpack(raw[offset:])
+
+                @classmethod
+                def unpack_from(cls, src: BinaryIO, limit: int|None = None) -> tuple[Self, int]:
+                    length: int|None = None
+                    readlen = 0
+                    for LT in cls._LENGTH_TYPES:
+                        len2, lenlen = LT.unpack_from(src, limit)
+                        if length is not None and length != lenlen + len2:
+                            raise ValueError
+                        length = len2
+                        readlen += lenlen
+                        if limit is not None:
+                            limit -= lenlen
+                            if limit < length:
+                                raise ValueError
+                    assert length is not None
+                    raw = force_read(src, length)
+                    return super().unpack(raw), readlen + length
+            """))
+
+    @override
+    def prereqs(self) -> Iterable[Nested]:
+        yield self.inner_type
+
+@flyweight
+@dataclass(frozen=True)
+class _Bounded(GenSpec):
+    length_types: tuple[Uint,...]
+    inner_type: Nested
+
+    @property
+    def _parent(self) -> _BoundedX:
+        return _BoundedX(self.inner_type)
+
+    def _restub(self) -> bool:
+        pstub = exact_lstrip(self._parent.stub, 'Bounded')
+        prefix = ''.join(f'B{lt.bit_length}' for lt in self.length_types)
+        return self.update_stub(f'{prefix}{pstub}', 70)
+
+    def __post_init__(self) -> None:
+        self._restub()
+
+    @override
+    def suggest(self, name: str, rank: float) -> bool:
+        if rank == FORCE_RANK:
+            return self.update_stub(name, rank)
+        elif self._parent.suggest(name, min(rank, 90)):
+            return self._restub()
+        else:
+            return False
+
+    @override
+    def generate(self, dest: TextIO, names: dict[GenSpec,str]) -> None:
+        dest.write(dedent(f"""\
+            class {names[self]}({names[self._parent]}):
+                _LENGTH_TYPES = {write_tuple(names[lt] for lt in self.length_types)}
+            """))
+
+    @override
+    def prereqs(self) -> Iterable[Nested]:
+        yield self._parent
+        yield from self.length_types
+
+def Bounded(bit_length: int, inner_type: Nested) -> _Bounded:
+    lt = Uint(bit_length)
+    if isinstance(inner_type, _Bounded):
+        return _Bounded((lt,) + inner_type.length_types,
+                        inner_type.inner_type)
+    else:
+        return _Bounded((lt,), inner_type)
+
+@flyweight
+@dataclass(frozen=True)
+class Sequence(GenSpec):
+    item_type: Nested
+
+    def _name_suggestion(self) -> str:
+        return f'Seq{get_stub(self.item_type)}'
+
+    def __post_init__(self) -> None:
+        self.update_stub(self._name_suggestion(), 70)
+
+    @override
+    def suggest(self, name: str, rank: float) -> bool:
+        if rank == FORCE_RANK:
+            return self.update_stub(name, rank)
+        elif maybe_suggest(self.item_type, exact_rstrip(name, 's'), min(rank, 90)):
+            return self.update_stub(self._name_suggestion(), 70)
+        else:
+            return False
+
+    @override
+    def generate(self, dest: TextIO, names: dict[GenSpec,str]) -> None:
+        nn = get_name(names, self.item_type)
+        dest.write(dedent(f"""\
+            class {names[self]}(spec._Sequence[{nn}]):
+                _ITEM_TYPE = {nn}
+            """))
+
+    @override
+    def prereqs(self) -> Iterable[Nested]:
+        yield self.item_type
+
+@dataclass(frozen=True)
+class _Struct(GenSpec):
+    schema: tuple[tuple[str, Nested], ...]
+
+    def __post_init__(self) -> None:
+        self.suggest('Struct', 10)
+        for name,typ in self.schema:
+            if isinstance(typ, GenSpec):
+                typ.suggest(camel_case(name), 30)
+
+    @override
+    def generate(self, dest: TextIO, names: dict[GenSpec,str]) -> None:
+        dest.write(dedent(f"""\
+            @dataclass(frozen=True)
+            class {names[self]}(spec._StructBase):
+                _member_names: ClassVar[tuple[str,...]] = ({','.join(repr(name) for (name,_) in self.schema)},)
+                _member_types: ClassVar[tuple[type[FullSpec],...]] = ({','.join(get_name(names,typ) for _,typ in self.schema)},)
+            """))
+        for name,typ in self.schema:
+            dest.write(f'    {name}: {get_name(names,typ)}\n')
+
+    @override
+    def prereqs(self) -> Iterable[Nested]:
+        for _,typ in self.schema:
+            yield typ
+
+def Struct(**kwargs: Nested) -> _Struct:
+    return _Struct(tuple(kwargs.items()))
+
+@dataclass(frozen=True)
+class _SelecteeDefault(GenSpec):
+    select_type: Nested
+    data_type: Nested
+
+    def __post_init__(self) -> None:
+        self.suggest(f'Default{get_stub(self.select_type)}Selection', 30)
+
+    @override
+    def generate(self, dest: TextIO, names: dict[GenSpec,str]) -> None:
+        sname = get_name(names, self.select_type)
+        dname = get_name(names, self.data_type)
+        dest.write(dedent(f"""\
+            class {names[self]}(spec._Selectee[{sname}, {dname}]):
+                _SELECT_TYPE = {sname}
+                _DATA_TYPE = {dname}
+            """))
+
+    @override
+    def prereqs(self) -> Iterable[Nested]:
+        yield self.select_type
+        yield self.data_type
+
+@dataclass(frozen=True)
+class _SelecteeGen(_SelecteeDefault):
+    selection: str
+
+    @override
+    def __post_init__(self) -> None:
+        self.suggest(f'{self.selection}Selection', 30)
+
+    @override
+    def suggest(self, name: str, rank: float) -> bool:
+        if self.update_stub(name, rank):
+            maybe_suggest(self.data_type, f'{name}Data', 20)
+            return True
+        else:
+            return False
+
+    @override
+    def generate(self, dest: TextIO, names: dict[GenSpec,str]) -> None:
+        sname = get_name(names, self.select_type)
+        dname = get_name(names, self.data_type)
+        dest.write(dedent(f"""\
+            class {names[self]}(spec._SpecificSelectee[{sname}, {dname}]):
+                _SELECT_TYPE = {sname}
+                _DATA_TYPE = {dname}
+                _SELECTOR = {sname}.{self.selection}
+            """))
+
+@dataclass(frozen=True)
+class _SelectActual(GenSpec):
+    select_type: Nested
+    default_type: _SelecteeDefault|None
+    selectees: tuple[tuple[str, _SelecteeGen], ...]
+
+    def __post_init__(self) -> None:
+        sname = get_stub(self.select_type)
+        self.update_stub(exact_rstrip(sname, 'Type', 'Obj'), 60)
+        for name, sel in self.selectees:
+            sel.suggest(camel_case(name) + self.stub, 40)
+
+    @override
+    def suggest(self, name: str, rank: float) -> bool:
+        if self.update_stub(name, rank):
+            stub = exact_rstrip(name, 'Obj')
+            for sname, sgen in self.selectees:
+                sgen.suggest(camel_case(sname) + stub, 40)
+            return True
+        else:
+            return False
+
+    @override
+    def generate(self, dest: TextIO, names: dict[GenSpec,str]) -> None:
+        sname = get_name(names, self.select_type)
+        dname = 'None' if self.default_type is None else names[self.default_type]
+        tname = f'{names[self]}Variants'
+        dest.write(dedent(f"""
+            type {tname} = {' | '.join(str(names[s]) for _,s in self.selectees)}
+
+            class {names[self]}(spec._Select[{sname}]):
+                _SELECT_TYPE = {sname}
+                _DEFAULT_TYPE = {dname}
+                _SELECTEES = {{
+            """))
+        for key, s in self.selectees:
+            dest.write(f"        {sname}.{key}: {names[s]},\n")
+        dest.write("    }\n")
+        dest.write(indent("    ", dedent(f"""\
+                def __init__(self, value: {tname}) -> None:
+                    super().__init__(value)
+                    self._value: {tname} = value
+                @property
+                def value(self) -> {tname}:
+                    return self._value
+            """)))
+
+    @override
+    def prereqs(self) -> Iterable[Nested]:
+        yield self.select_type
+        if self.default_type is not None:
+            yield self.default_type
+        for _,sel in self.selectees:
+            yield sel
+
+@dataclass
+class Select:
+    select_type: Nested
+    bit_length: int|None = None
+    default_type: Nested|None = None
+
+    def _maybe_bounded(self, typ: Nested) -> Nested:
+        if self.bit_length is None:
+            return typ
+        else:
+            return Bounded(self.bit_length, typ)
+
+    def __call__(self, **kwargs: Nested) -> _SelectActual:
+        return _SelectActual(
+            self.select_type,
+            (None if self.default_type is None
+             else _SelecteeDefault(self.select_type, self._maybe_bounded(self.default_type))),
+            tuple((enum_key,
+                   _SelecteeGen(self.select_type, self._maybe_bounded(typ), enum_key))
+                  for (enum_key, typ) in kwargs.items()),
+        )
 
 
-    Days = EnumSpec(8)(
-        Monday = 1,
-        Tuesday = 2,
-    ),
-    Months = EnumSpec(16)(
-        February = 2,
-        May = 5,
-    ),
-    Uint8 = Uint(8),
-    Uint24 = Uint(24),
-    Raw8 = Bounded(8, Raw),
-    Raw16 = Bounded(16, Raw),
-    String8 = Bounded(8, String),
-    String16 = Bounded(16, String),
-    Shorts = Sequence(Uint(16)),
-    ShortShorts = Bounded(8, Sequence(Uint(16))),
-    B16S8 = Bounded(16, Sequence(Uint(8))),
-    Person = Struct(
-        name = 'String16',
-        phone = Uint(16),
-    ),
-    Animal = Struct(
-        name = Bounded(8, String),
-        legs = Uint(8),
-        nums = Bounded(8, Sequence(Uint(16))),
-    ),
-    InstrumentType = EnumSpec(8)(
-        Brass = 1,
-        Woodwind = 2,
-        Strings = 3,
-    ),
-    Instrument = Select('InstrumentType')(
-        Brass = Struct(
-            valves = 'Uint8',
-            weight = Uint(16),
-        ),
-        Woodwind = Bounded(8, String),
-    ),
-)
+@dataclass
+class Names:
+    _order: list[GenSpec] = field(default_factory=list)
+    _registered: set[GenSpec] = field(default_factory=set)
 
-def write_to(fname: str) -> None:
-    with open(fname, 'w') as fout:
-        fout.write("from tls_common import *")
-        generate_specs(fout, **specs)
-    print('specs written to', fname)
+    def register(self, spec: GenSpec) -> None:
+        if spec in self._registered:
+            return # already registered
+        self._registered.add(spec)
+        for prereq in spec.prereqs():
+            if isinstance(prereq, GenSpec):
+                self.register(prereq)
+        self._order.append(spec)
 
-if __name__ == '__main__':
-    write_to('spec6.py')
+    def assign(self) -> dict[GenSpec,str]:
+        counts: Counter[str] = Counter()
+        for spec in self._order:
+            counts[spec.stub] += 1
+        assignment = {}
+        for spec in self._order:
+            count = counts[spec.stub]
+            if count == 1:
+                assignment[spec] = spec.stub
+                index = 1
+            else:
+                index = 1 if (count > 1) else -count
+                assignment[spec] = f'{spec.stub}_{index}'
+            counts[spec.stub] = -index - 1
+        return assignment
+
+    def order(self) -> Iterable[GenSpec]:
+        yield from self._order
+
+def get_name(names: dict[GenSpec, str], spec: Nested) -> str:
+    match spec:
+        case GenSpec():
+            return names[spec]
+        case type():
+            return f"{spec.__module__}.{spec.__name__}"
+        case str():
+            return spec
+
+@dataclass
+class SourceGen:
+    dest: TextIO
+    names: dict[GenSpec,str]
+    _written: set[GenSpec] = field(default_factory=set)
+
+    def __post_init__(self) -> None:
+        self.dest.write(dedent('''
+            # XXX AUTO-GENERATED - DO NOT EDIT! XXX
+            from typing import Self, override, BinaryIO, ClassVar, Any
+            import enum
+            import dataclasses
+            from dataclasses import dataclass
+            import spec
+            from spec import *
+            '''))
+
+    def write(self, spec: GenSpec) -> None:
+        if spec not in self._written:
+            for pre in spec.prereqs():
+                if isinstance(pre, GenSpec):
+                    self.write(pre)
+            self._written.add(spec)
+            self.dest.write('\n')
+            spec.generate(self.dest, self.names)
+
+    def write_all(self, specs: Iterable[GenSpec]) -> None:
+        for spec in specs:
+            self.write(spec)
+
+
+def generate_specs(dest: TextIO, **kwargs: GenSpec) -> None:
+    ns = Names()
+
+    for (name, spec) in kwargs.items():
+        spec.suggest(name, FORCE_RANK)
+        ns.register(spec)
+
+    SourceGen(dest, ns.assign()).write_all(ns.order())
