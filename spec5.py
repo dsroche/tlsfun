@@ -447,7 +447,7 @@ class _Struct(GenSpec):
         self.suggest('Struct', 10)
         for name,typ in self.schema:
             if isinstance(typ, GenSpec):
-                typ.suggest(name, 30)
+                typ.suggest(camel_case(name), 30)
 
     @override
     def generate(self, dest: TextIO, names: dict[GenSpec,str]) -> None:
@@ -469,12 +469,33 @@ def Struct(**kwargs: Nested) -> _Struct:
     return _Struct(tuple(kwargs.items()))
 
 @dataclass(frozen=True)
-class _SelecteeGen(GenSpec):
+class _SelecteeDefault(GenSpec):
     select_type: Nested
-    selection: str
     data_type: Nested
-    parent: '_SelectActual|None' = field(default=None, hash=False, compare=False)
 
+    def __post_init__(self) -> None:
+        self.suggest(f'Default{get_stub(self.select_type)}Selection', 30)
+
+    @override
+    def generate(self, dest: TextIO, names: dict[GenSpec,str]) -> None:
+        sname = get_name(names, self.select_type)
+        dname = get_name(names, self.data_type)
+        dest.write(dedent(f"""\
+            class {names[self]}(spec_static._Selectee[{sname}, {dname}]):
+                _SELECT_TYPE = {sname}
+                _DATA_TYPE = {dname}
+            """))
+
+    @override
+    def prereqs(self) -> Iterable[Nested]:
+        yield self.select_type
+        yield self.data_type
+
+@dataclass(frozen=True)
+class _SelecteeGen(_SelecteeDefault):
+    selection: str
+
+    @override
     def __post_init__(self) -> None:
         self.suggest(f'{self.selection}Selection', 30)
 
@@ -486,36 +507,27 @@ class _SelecteeGen(GenSpec):
         else:
             return False
 
-    # TODO XXX remove?? it's not used FIXME
-    def set_parent(self, parent_: '_SelectActual') -> None:
-        assert self.parent is None
-        object.__setattr__(self, 'parent', parent_)
-
     @override
     def generate(self, dest: TextIO, names: dict[GenSpec,str]) -> None:
         sname = get_name(names, self.select_type)
         dname = get_name(names, self.data_type)
         dest.write(dedent(f"""\
-            class {names[self]}(spec_static._Selectee[{sname}, {dname}]):
-                _SELECTOR = {sname}.{self.selection}
+            class {names[self]}(spec_static._SpecificSelectee[{sname}, {dname}]):
+                _SELECT_TYPE = {sname}
                 _DATA_TYPE = {dname}
+                _SELECTOR = {sname}.{self.selection}
             """))
-
-    @override
-    def prereqs(self) -> Iterable[Nested]:
-        yield self.select_type
-        yield self.data_type
 
 @dataclass(frozen=True)
 class _SelectActual(GenSpec):
     select_type: Nested
+    default_type: _SelecteeDefault|None
     selectees: tuple[tuple[str, _SelecteeGen], ...]
 
     def __post_init__(self) -> None:
         sname = get_stub(self.select_type)
         self.update_stub(exact_rstrip(sname, 'Type', 'Obj'), 60)
         for name, sel in self.selectees:
-            sel.set_parent(self) #TODO maybe remove?
             sel.suggest(camel_case(name) + self.stub, 40)
 
     @override
@@ -531,12 +543,14 @@ class _SelectActual(GenSpec):
     @override
     def generate(self, dest: TextIO, names: dict[GenSpec,str]) -> None:
         sname = get_name(names, self.select_type)
+        dname = 'None' if self.default_type is None else names[self.default_type]
         tname = f'{names[self]}Variants'
         dest.write(dedent(f"""
             type {tname} = {' | '.join(str(names[s]) for _,s in self.selectees)}
 
             class {names[self]}(spec_static._Select[{sname}]):
                 _SELECT_TYPE = {sname}
+                _DEFAULT_TYPE = {dname}
                 _SELECTEES = {{
             """))
         for key, s in self.selectees:
@@ -554,21 +568,30 @@ class _SelectActual(GenSpec):
     @override
     def prereqs(self) -> Iterable[Nested]:
         yield self.select_type
+        if self.default_type is not None:
+            yield self.default_type
         for _,sel in self.selectees:
             yield sel
 
 @dataclass
 class Select:
     select_type: Nested
-    bit_length: int|None = field(default=None)
+    bit_length: int|None = None
+    default_type: Nested|None = None
+
+    def _maybe_bounded(self, typ: Nested) -> Nested:
+        if self.bit_length is None:
+            return typ
+        else:
+            return Bounded(self.bit_length, typ)
 
     def __call__(self, **kwargs: Nested) -> _SelectActual:
         return _SelectActual(
             self.select_type,
+            (None if self.default_type is None
+             else _SelecteeDefault(self.select_type, self._maybe_bounded(self.default_type))),
             tuple((enum_key,
-                   _SelecteeGen(self.select_type, enum_key,
-                                (typ if self.bit_length is None
-                                 else Bounded(self.bit_length, typ))))
+                   _SelecteeGen(self.select_type, self._maybe_bounded(typ), enum_key))
                   for (enum_key, typ) in kwargs.items()),
         )
 

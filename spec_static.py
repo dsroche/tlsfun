@@ -305,7 +305,11 @@ class _StructBase(FullSpec):
     @classmethod
     def unpack(cls, raw: bytes) -> Self:
         buf = BytesIO(raw)
-        instance, got = cls.unpack_from(buf, len(raw))
+        offset = 0
+        # XXX mypy doesn't know about __func__
+        instance, got = _StructBase.unpack_from.__func__(cls, buf, len(raw)) # type: ignore
+        # XXX mypy doesn't realize that instance must be of type Self here
+        assert isinstance(instance, cls)
         if got != len(raw):
             raise ValueError
         return instance
@@ -359,15 +363,16 @@ class _Const[T: Spec](FullSpec):
         return cls(), len(raw)
 
 class _Selectee[S: _SpecEnum, T: FullSpec](FullSpec):
-    _SELECTOR: S
+    _SELECT_TYPE: type[S]
     _DATA_TYPE: type[T]
 
-    def __init__(self, data: T) -> None:
+    def __init__(self, typ: S, data: T) -> None:
+        self._typ: S = typ
         self._data: T = data
 
     @property
     def typ(self) -> S:
-        return self._SELECTOR
+        return self._typ
 
     @property
     def data(self) -> T:
@@ -377,16 +382,19 @@ class _Selectee[S: _SpecEnum, T: FullSpec](FullSpec):
     def jsonify(self) -> Json:
         return {'typ': self.typ.jsonify(), 'data': self.data.jsonify()}
 
+    @classmethod
+    def _check_typ(cls, typ: S) -> S:
+        return typ
+
     @override
     @classmethod
     def from_json(cls, obj: Json) -> Self:
         match obj:
-            case {'typ': typ, 'data': data, **rest}:
+            case {'typ': jtyp, 'data': data, **rest}:
                 if rest:
                     raise ValueError
-                if cls._SELECTOR.from_json(typ) != cls._SELECTOR:
-                    raise ValueError
-                return cls(cls._DATA_TYPE.from_json(data))
+                typ = cls._check_typ(cls._SELECT_TYPE.from_json(jtyp))
+                return cls(typ=typ, data=cls._DATA_TYPE.from_json(data))
         raise ValueError
 
     @override
@@ -404,25 +412,43 @@ class _Selectee[S: _SpecEnum, T: FullSpec](FullSpec):
     @override
     @classmethod
     def unpack(cls, raw: bytes) -> Self:
-        tlen = cls._SELECTOR._BYTE_LENGTH
+        tlen = cls._SELECT_TYPE._BYTE_LENGTH
         if len(raw) < tlen:
             raise ValueError
-        cls._SELECTOR.unpack(raw[:tlen])
-        return cls(cls._DATA_TYPE.unpack(raw[tlen:]))
+        typ = cls._check_typ(cls._SELECT_TYPE.unpack(raw[:tlen]))
+        return cls(typ=typ, data=cls._DATA_TYPE.unpack(raw[tlen:]))
 
     @override
     @classmethod
     def unpack_from(cls, src: BinaryIO, limit: int|None = None) -> tuple[Self, int]:
-        _, tlen = cls._SELECTOR.unpack_from(src, limit)
-        return cls.unpack_from_data(src, (None if limit is None else limit-tlen))
+        typ, tlen = cls._SELECT_TYPE.unpack_from(src, limit)
+        return cls.unpack_from_data(typ, src, (None if limit is None else limit-tlen))
 
     @classmethod
-    def unpack_from_data(cls, src: BinaryIO, limit: int|None = None) -> tuple[Self, int]:
+    def unpack_from_data(cls, typ: S, src: BinaryIO, limit: int|None = None) -> tuple[Self, int]:
+        typ = cls._check_typ(typ)
         data, dlen = cls._DATA_TYPE.unpack_from(src, limit)
-        return cls(data), cls._SELECTOR._BYTE_LENGTH + dlen
+        return cls(typ=typ, data=data), cls._SELECT_TYPE._BYTE_LENGTH + dlen
+
+class _SpecificSelectee[S: _SpecEnum, T: FullSpec](_Selectee[S, T]):
+    _SELECTOR: S
+
+    def __init__(self, typ: S|None = None, data: T|None = None) -> None:
+        assert data is not None
+        super().__init__(self._SELECTOR, data)
+        if typ is not None and typ != self._SELECTOR:
+            raise ValueError
+
+    @override
+    @classmethod
+    def _check_typ(cls, typ: S) -> S:
+        if typ == cls._SELECTOR:
+            return typ
+        raise ValueError
 
 class _Select[S: _SpecEnum](FullSpec):
     _SELECT_TYPE: type[S]
+    _DEFAULT_TYPE: type[_Selectee[S,FullSpec]] | None
     _SELECTEES: dict[S, type[_Selectee[S,FullSpec]]]
 
     def __init__(self, value: _Selectee[S,FullSpec]) -> None:
@@ -440,14 +466,21 @@ class _Select[S: _SpecEnum](FullSpec):
         return self._value.jsonify()
 
     @classmethod
+    def _get_value_cls(cls, selector: S) -> type[_Selectee[S,FullSpec]]:
+        try:
+            return cls._SELECTEES[selector]
+        except KeyError:
+            if cls._DEFAULT_TYPE is None:
+                raise ValueError(f'got unexpected selector {repr(selector)} with no default')
+            else:
+                return cls._DEFAULT_TYPE
+
+    @classmethod
     def from_json(cls, obj: Json) -> Self:
         match obj:
             case {'typ': typ}:
                 selector = cls._SELECT_TYPE.from_json(typ)
-                try:
-                    value_cls = cls._SELECTEES[selector]
-                except KeyError:
-                    raise ValueError
+                value_cls = cls._get_value_cls(selector)
                 return cls(value_cls.from_json(obj))
         raise ValueError
 
@@ -466,20 +499,14 @@ class _Select[S: _SpecEnum](FullSpec):
         if len(raw) < slen:
             raise ValueError
         selector = cls._SELECT_TYPE.unpack(raw[:slen])
-        try:
-            value_cls = cls._SELECTEES[selector]
-        except KeyError:
-            raise ValueError
+        value_cls = cls._get_value_cls(selector)
         return cls(value_cls.unpack(raw))
 
     @classmethod
     def unpack_from(cls, src: BinaryIO, limit: int|None = None) -> tuple[Self, int]:
         selector, slen = cls._SELECT_TYPE.unpack_from(src, limit)
-        try:
-            value_cls = cls._SELECTEES[selector]
-        except KeyError:
-            raise ValueError
-        value, got = value_cls.unpack_from_data(src, (None if limit is None else limit-slen))
+        value_cls = cls._get_value_cls(selector)
+        value, got = value_cls.unpack_from_data(selector, src, (None if limit is None else limit-slen))
         return cls(value), got
 
 

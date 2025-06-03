@@ -221,7 +221,7 @@ specs: dict[str, GenSpec] = kwdict(
         aead_id = 'HpkeAeadId',
     ),
 
-    ClientExtension = Select('ExtensionType', 16)(
+    ClientExtension = Select('ExtensionType', 16, Raw)(
         SERVER_NAME =
             Sequence(Bounded(16, Struct(
                 name_type = Uint(8), # TODO FIXME .const(0),
@@ -284,7 +284,7 @@ specs: dict[str, GenSpec] = kwdict(
 
     ECHConfigList = Wrap(Bounded(16, Sequence('ECHConfig'))),
 
-    ServerExtension = Select('ExtensionType', 16)(
+    ServerExtension = Select('ExtensionType', 16, Raw)(
         SERVER_NAME =
             Sequence(Bounded(16, Struct(
                 name_type = Uint(8),
@@ -345,6 +345,36 @@ specs: dict[str, GenSpec] = kwdict(
         NEW_SESSION_TICKET = 'Ticket',
     ),
 
+    Alert = Struct(
+        level       = 'AlertLevel',
+        description = 'AlertDescription',
+    ),
+
+    RecordHeader = Struct(
+        typ  = 'ContentType',
+        vers = 'Version',
+        size = Uint(16),
+    ),
+
+    Record = Select('ContentType')(
+        CHANGE_CIPHER_SPEC = Struct(
+            version = 'Version', #TODO const TLS_1_2
+            payload = Bounded(16, Raw), #TODO const b'\x01'
+        ),
+        HANDSHAKE = Struct(
+            version = 'Version',
+            payload = Bounded(16, Raw),
+        ),
+        APPLICATION_DATA = Struct(
+            version = 'Version', #TODO const TLS_1_2
+            payload = Bounded(16, Raw),
+        ),
+        ALERT = Struct(
+            version = 'Version',
+            payload = 'Alert',
+        ),
+    ),
+
 
     comment = Comment("""
 
@@ -374,18 +404,6 @@ return self.Tuple(*(typ._unpack(part) for typ,part in zip(self._types, parts)))
 
 InnerPlaintext = _InnerPlaintext()
 
-
-Alert = Struct(
-level       = AlertLevel,
-description = AlertDescription,
-)
-
-
-RecordHeader = Struct(
-typ  = ContentType,
-vers = Version,
-size = Integer(2),
-)
 
 def _record_body_spec(prefix):
 match prefix:

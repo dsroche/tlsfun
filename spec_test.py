@@ -7,31 +7,6 @@ from spec6 import *
 
 import spec_static
 
-class PersonSelect(spec_static._Selectee[Months,Person]):
-    _SELECTOR = Months.February
-    _DATA_TYPE = Person
-
-class AnimalSelect(spec_static._Selectee[Months,Animal]):
-    _SELECTOR = Months.May
-    _DATA_TYPE = Animal
-
-type A = PersonSelect | AnimalSelect
-
-class B(spec_static._Select[Months]):
-    _SELECT_TYPE = Months
-    _SELECTEES = {
-        Months.February: PersonSelect,
-        Months.May: AnimalSelect,
-    }
-
-    def __init__(self, value: A):
-        super().__init__(value)
-        self._value: A = value
-
-    @property
-    def value(self) -> A:
-        return self._value
-
 def check[T](a: T, b: T) -> None:
     if isinstance(a, bytes) and isinstance(b, bytes):
         check(a.hex(), b.hex())
@@ -84,14 +59,7 @@ def positive_test_cases() -> Iterable[tuple[Spec, Json, str]]:
     yield Shorts([Uint16(20), Uint16(25)]), [20,25], '00140019'
     yield ShortShorts([Uint16(3),Uint16(4),Uint16(5)]), [3,4,5], '06000300040005'
     #yield B16S8((Uint8(10), Uint8(20))), [10,20], '00020a14'
-    yield Person(String16('ada'), Uint16(1)), {'name':'ada','phone':1}, '00036164610001'
-    yield (Animal(String8('doggie'), legs=Uint8(4), nums=ShortShorts(())),
-           {'name': 'doggie', 'legs': 4, 'nums': []},
-           '06646f676769650400')
-    yield (B(AnimalSelect(Animal(String8('cat'), legs=Uint8(4), nums=ShortShorts(())))),
-           {'typ': 'May', 'data': {'name': 'cat', 'legs': 4, 'nums': []}},
-           '0005036361740400')
-    yield (BrassInstrument(BrassInstrumentData(valves=Uint8(5), weight=Uint16(40))),
+    yield (BrassInstrument(data=BrassInstrumentData(valves=Uint8(5), weight=Uint16(40))),
            {'typ': 'Brass', 'data': {'valves': 5, 'weight': 40},},
            '01050028')
 #    test_spec(Uint8, 33, 33, '21')
