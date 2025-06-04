@@ -401,7 +401,20 @@ specs: dict[str, GenSpec] = kwdict(
         public = Bounded(32, Raw),
     ),
 
+    TicketInfoStruct = Struct(
+        ticket_id = Bounded(16, Raw),
+        secret = Bounded(8, Raw),
+        csuite = 'CipherSuite',
+        modes = Bounded(8, Sequence('PskKeyExchangeMode')),
+        mask = Uint(32),
+        lifetime = Uint(32),
+        creation = Uint(64),
+    ),
+
+
     #### XXX remove below TODO
+
+    Happy = Wrap(Uint(32)),
 
     Days = EnumSpec(8)(
         Monday = 1,

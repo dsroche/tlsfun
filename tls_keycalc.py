@@ -1,4 +1,4 @@
-"""Key derivation and key schedule logic for TLS 1.3.i
+"""Key derivation and key schedule logic for TLS 1.3
 
 Includes code for pre-shared keys (i.e. tickets)."""
 
@@ -30,67 +30,28 @@ from tls_crypto import (
 )
 
 
-class TicketInfo:
-    def __init__(self, ticket_id, secret, csuite, modes, mask, lifetime, creation=None):
-        self._id = ticket_id
-        self._secret = secret
-        self._csuite = csuite
-        self._modes = tuple(modes)
-        self._mask = mask
-        self._lifetime = lifetime
-        self._creation = time.time() if creation is None else creation
-
-    def to_dict(self):
-        return {
-            'ticket_id': b64enc(self._id),
-            'secret': b64enc(self._secret),
-            'csuite': int(self._csuite),
-            'modes': [int(mode) for mode in self._modes],
-            'mask': self._mask,
-            'lifetime': self._lifetime,
-            'creation': self._creation,
-        }
-
-    def dump(self, *args, **kwargs):
-        return json.dump(self.to_dict(), *args, **kwargs)
-
-    def dumps(self, *args, **kwargs):
-        return json.dumps(self.to_dict(), *args, **kwargs)
-
-    @classmethod
-    def from_dict(cls, d):
-        return cls(
-            ticket_id = b64dec(d['ticket_id']),
-            secret = b64dec(d['secret']),
-            csuite = CipherSuite(d['csuite']),
-            modes = tuple(PskKeyExchangeMode(code) for code in d['modes']),
-            mask = d['mask'],
-            lifetime = d['lifetime'],
-            creation = d['creation'],
-        )
-
-    @classmethod
-    def load(cls, *args, **kwargs):
-        return cls.from_dict(json.load(*args, **kwargs))
-
-    @classmethod
-    def loads(cls, *args, **kwargs):
-        return cls.from_dict(json.loads(*args, **kwargs))
+@dataclass(frozen=True)
+class TicketInfo(TicketInfoStruct):
+    @property
+    def secret(self) -> bytes:
+        return self.secret
 
     @property
-    def secret(self):
-        return self._secret
+    def csuite(self) -> CipherSuite:
+        return self.csuite
 
     @property
-    def csuite(self):
-        return self._csuite
+    def modes(self) -> set[PskKeyExchangeMode]:
+        return set(self.modes)
 
-    @property
-    def modes(self):
-        return set(self._modes)
+    def add_psk_ext(self, chello: Handshake, send_time: float|None = None) -> Handshake:
+        if chello.typ != HandshakeType.CLIENT_HELLO:
+            raise ValueError(f"need a client hello extension, not {chello.typ}")
 
-    def add_psk_ext(self, chello, send_time):
-        # chello should be prepacked and without the PSK extension
+        extensions = list(chello.data.extensions)
+        if any(ext.typ == ExtensionType.PRE_SHARED_KEY for ext in extensions):
+            raise ValueError(f"client hello should not contain PSK extension yet")
+
         if send_time is None:
             send_time = time.time()
         oage = (round((send_time - self._creation) * 1000) + self._mask) % 2**32
@@ -98,6 +59,7 @@ class TicketInfo:
 
         # construct extension with dummy binder
         binder_list = [dummy_binder]
+        #TODO HERE WORKING
         psk_ext = kwdict(
             typ  = ExtensionType.PRE_SHARED_KEY,
             data = kwdict(
@@ -110,7 +72,6 @@ class TicketInfo:
         )
 
         # add dummy extension to chello
-        extensions = list(chello.body.extensions)
         assert all(ext.typ != ExtensionType.PRE_SHARED_KEY for ext in extensions)
         extensions.append(psk_ext)
         body = chello.body._asdict() | {'extensions': extensions}

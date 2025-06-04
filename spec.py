@@ -22,6 +22,8 @@ def force_write(dest: BinaryIO, data: bytes) -> None:
     dest.flush()
 
 class Spec:
+    _CREATE_FROM: type[Any] | None = None
+
     def jsonify(self) -> Json:
         raise NotImplementedError
 
@@ -141,6 +143,8 @@ class Empty(_Fixed):
         return (cls(), 0)
 
 class _Integral(_Fixed, int):
+    _CREATE_FROM = int
+
     def __new__(cls, value: int) -> Self:
         return int.__new__(cls, value)
 
@@ -148,6 +152,10 @@ class _Integral(_Fixed, int):
         _Fixed.__init__(self)
         if not (0 <= value < 2**(self._BYTE_LENGTH * 8)):
             raise ValueError
+
+    @classmethod
+    def create(cls, value: int) -> Self:
+        return cls(value)
 
     def jsonify(self) -> Json:
         return self
@@ -172,6 +180,12 @@ class _Integral(_Fixed, int):
         return cls(int.from_bytes(raw))
 
 class String(Spec, str):
+    _CREATE_FROM = str
+
+    @classmethod
+    def create(cls, value: str) -> Self:
+        return cls(value)
+
     @override
     def jsonify(self) -> Json:
         return self
@@ -203,6 +217,12 @@ class String(Spec, str):
         return cls(raw.decode('utf8'))
 
 class Raw(Spec, bytes):
+    _CREATE_FROM = bytes
+
+    @classmethod
+    def create(cls, value: bytes) -> Self:
+        return cls(value)
+
     def jsonify(self) -> Json:
         return self.hex()
 
@@ -235,6 +255,7 @@ class _FixRaw(Raw, _Fixed):
             raise ValueError
 
 class _Sequence[T: FullSpec](Spec, tuple[T,...]):
+    _CREATE_FROM: type[Iterable[T]]
     _ITEM_TYPE: type[T]
 
     @override

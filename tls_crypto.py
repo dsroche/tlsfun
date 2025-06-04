@@ -541,9 +541,9 @@ class _Pyhpke_Kem(KeyEncaps):
     @override
     def gen_private(self, rgen: Random) -> bytes:
         keypair = self._kem.derive_key_pair(rgen.randbytes(64))
-        return PyhpkeKeypair(
-            private = B32Raw(keypair.private_key.to_private_bytes()),
-            public  = B32Raw(keypair.public_key.to_public_bytes()),
+        return PyhpkeKeypair.create(
+            private = keypair.private_key.to_private_bytes(),
+            public = keypair.public_key.to_public_bytes(),
         ).pack()
 
     @override
@@ -633,10 +633,10 @@ def hkdf_extract(hash_alg: Hasher, salt: bytes, ikm: bytes) -> bytes:
 
 def hkdf_expand_label(hash_alg: Hasher, secret: bytes, label: bytes, cont: bytes, length: int) -> bytes:
     # rfc8446 sect 7.1
-    info = HkdfLabel(
-        length  = Uint16(length),
-        label   = Raw8(b'tls13 ' + label),
-        context = Raw8(cont),
+    info = HkdfLabel.create(
+        length = length,
+        label   = b'tls13 ' + label,
+        context = cont,
     ).pack()
     return hash_alg.hkdf_expand(prk=secret, info=info, length=length)
 
@@ -669,12 +669,11 @@ def gen_cert(name: str, sig_alg: SignatureScheme, rgen: Random) -> CertSecrets:
         .add_extension(x509.SubjectAlternativeName([x509.DNSName(name)]),critical=False)
         .add_extension(x509.BasicConstraints(ca=False,path_length=None), critical=True)
         .sign(private_key=pyca_from_bytes_private(private_key), algorithm=SHA256()))
-    return CertSecrets(
+    return CertSecrets.create(
         sig_alg = sig_alg,
-        private_key = B32Raw(private_key),
-        cert_der = B32Raw(cert.public_bytes(Encoding.DER)),
+        private_key = private_key,
+        cert_der = cert.public_bytes(Encoding.DER),
     )
-
 
 def gen_ech_config(
     public_name: str,
@@ -688,19 +687,19 @@ def gen_ech_config(
     kem = get_kem_alg(kem_id)
     seckey = kem.gen_private(rgen)
     pubkey = kem.get_public(seckey)
-    return EchSecrets(
-        config = ECHConfig(Draft24ECHConfig(data=B16Draft24ECHConfigData(
-            key_config = KeyConfig(
-                config_id = Uint8(config_id),
+    return EchSecrets.create(
+        config = ECHConfig(Draft24ECHConfig(data=B16Draft24ECHConfigData.create(
+            key_config = KeyConfig.create(
+                config_id = config_id,
                 kem_id = kem_id,
-                public_key = Raw16(pubkey),
-                cipher_suites = B16SeqHpkeSymmetricCipherSuite(cipher_suites),
+                public_key = pubkey,
+                cipher_suites = cipher_suites,
             ),
-            maximum_name_length = Uint8(maximum_name_length),
-            public_name = String8(public_name),
-            extensions = B16SeqExtension([]),
+            maximum_name_length = maximum_name_length,
+            public_name = public_name,
+            extensions = [],
         ))),
-        private_key = B32Raw(seckey),
+        private_key = seckey,
     )
 
 def gen_server_secrets(
@@ -718,7 +717,7 @@ def gen_server_secrets(
     if config_id is None:
         config_id = rgen.randrange(2**8)
 
-    return ServerSecrets(
+    return ServerSecrets.create(
         cert = gen_cert(name, sig_alg, rgen),
-        eches = B32SeqEchSecrets([gen_ech_config(name, config_id, maximum_name_length, kem_id, cipher_suites, rgen)]),
+        eches = [gen_ech_config(name, config_id, maximum_name_length, kem_id, cipher_suites, rgen)],
     )
