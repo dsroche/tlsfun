@@ -49,22 +49,10 @@ from tls13_spec import (
     HpkeKemId,
     HpkeKdfId,
     HpkeAeadId,
-    ECHConfigVersion,
     PyhpkeKeypair,
-    B32Raw,
-    B32SeqEchSecrets,
-    ECHConfig,
     KeyConfig,
-    Uint8,
-    Uint16,
-    Raw16,
-    Raw8,
     HpkeSymmetricCipherSuite,
-    B16SeqHpkeSymmetricCipherSuite,
-    String8,
-    B16SeqExtension,
     Draft24ECHConfig,
-    B16Draft24ECHConfigData,
 )
 
 _PycaXPublicKey = X25519PublicKey | X448PublicKey
@@ -688,17 +676,17 @@ def gen_ech_config(
     seckey = kem.gen_private(rgen)
     pubkey = kem.get_public(seckey)
     return EchSecrets.create(
-        config = ECHConfig(Draft24ECHConfig(data=B16Draft24ECHConfigData.create(
-            key_config = KeyConfig.create(
-                config_id = config_id,
-                kem_id = kem_id,
-                public_key = pubkey,
-                cipher_suites = cipher_suites,
+        config = Draft24ECHConfig.create(
+            key_config = (
+                config_id,
+                kem_id,
+                pubkey,
+                cipher_suites,
             ),
             maximum_name_length = maximum_name_length,
             public_name = public_name,
             extensions = [],
-        ))),
+        ),
         private_key = seckey,
     )
 

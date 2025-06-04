@@ -22,7 +22,7 @@ def force_write(dest: BinaryIO, data: bytes) -> None:
     dest.flush()
 
 class Spec:
-    _CREATE_FROM: type[Any] | None = None
+    _CREATE_FROM: tuple[tuple[str, type[Any]], ...] | None = None
 
     def jsonify(self) -> Json:
         raise NotImplementedError
@@ -110,6 +110,11 @@ class _Fixed(FullSpec):
 
 class Empty(_Fixed):
     _BYTE_LENGTH: int = 0
+    _CREATE_FROM = ()
+
+    @classmethod
+    def create(cls) -> Self:
+        return cls()
 
     @override
     def jsonify(self) -> Json:
@@ -143,7 +148,7 @@ class Empty(_Fixed):
         return (cls(), 0)
 
 class _Integral(_Fixed, int):
-    _CREATE_FROM = int
+    _CREATE_FROM = (('value', int),)
 
     def __new__(cls, value: int) -> Self:
         return int.__new__(cls, value)
@@ -180,7 +185,7 @@ class _Integral(_Fixed, int):
         return cls(int.from_bytes(raw))
 
 class String(Spec, str):
-    _CREATE_FROM = str
+    _CREATE_FROM = (('value', str),)
 
     @classmethod
     def create(cls, value: str) -> Self:
@@ -217,7 +222,7 @@ class String(Spec, str):
         return cls(raw.decode('utf8'))
 
 class Raw(Spec, bytes):
-    _CREATE_FROM = bytes
+    _CREATE_FROM = (('value', bytes),)
 
     @classmethod
     def create(cls, value: bytes) -> Self:
@@ -255,7 +260,6 @@ class _FixRaw(Raw, _Fixed):
             raise ValueError
 
 class _Sequence[T: FullSpec](Spec, tuple[T,...]):
-    _CREATE_FROM: type[Iterable[T]]
     _ITEM_TYPE: type[T]
 
     @override
@@ -529,35 +533,3 @@ class _Select[S: _SpecEnum](FullSpec):
         value_cls = cls._get_value_cls(selector)
         value, got = value_cls.unpack_from_data(selector, src, (None if limit is None else limit-slen))
         return cls(value), got
-
-
-
-'''
-class Spec:
-    def jsonify(self) -> Json:
-        raise NotImplementedError
-
-    @classmethod
-    def from_json(cls, obj: Json) -> Self:
-        raise NotImplementedError
-
-    def packed_size(self) -> int:
-        return len(self.pack())
-
-    def pack(self) -> bytes:
-        raise NotImplementedError
-
-    def pack_to(self, dest: BinaryIO) -> int:
-        raw = self.pack()
-        force_write(dest, raw)
-        return len(raw)
-
-    @classmethod
-    def unpack(cls, raw: bytes) -> Self:
-        raise NotImplementedError
-
-class FullSpec(Spec):
-    @classmethod
-    def unpack_from(cls, src: BinaryIO, limit: int|None = None) -> tuple[Self, int]:
-        raise NotImplementedError
-'''

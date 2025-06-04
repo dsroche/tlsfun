@@ -58,7 +58,7 @@ class GenSpec:
     def prereqs(self) -> Iterable[Nested]:
         return ()
 
-    def create_from(self, names: dict['GenSpec',str]) -> str|None:
+    def create_from(self, names: dict['GenSpec',str]) -> Iterable[tuple[str,str]] | None:
         return None
 
 def get_stub(typ: Nested) -> str:
@@ -91,15 +91,14 @@ def maybe_suggest(typ: Nested, name: str, rank: float) -> bool:
     else:
         return False
 
-def get_create_from(typ: Nested, names: dict[GenSpec,str]) -> str|None:
+def get_create_from(typ: Nested, names: dict[GenSpec,str]) -> Iterable[tuple[str,str]] | None:
     match typ:
         case GenSpec():
             return typ.create_from(names)
         case type():
             cft = typ._CREATE_FROM
-            if cft is None:
-                return None
-            return get_name(cft, names)
+            return (None if cft is None
+                    else [(name, get_name(typ, names)) for (name,typ) in cft])
         case str():
             return None # TODO try to resolve names??
 
@@ -112,7 +111,7 @@ class Wrap(GenSpec):
         self.update_stub(f'Wrap{get_stub(self.inner_type)}', 30)
 
     @override
-    def create_from(self, names: dict[GenSpec,str]) -> str|None:
+    def create_from(self, names: dict[GenSpec,str]) -> Iterable[tuple[str,str]] | None:
         return get_create_from(self.inner_type, names)
 
     @override
@@ -132,11 +131,12 @@ class Wrap(GenSpec):
             """))
         cfn = self.create_from(names)
         if cfn is not None:
+            cfn = tuple(cfn)
             dest.write(indent(dedent(f"""\
-                _CREATE_FROM = {cfn}
+                _CREATE_FROM = ({''.join(f'({repr(name)},{typ}),' for name,typ in cfn)})
                 @classmethod
-                def create(cls, value: {cfn}) -> Self:
-                    return cls(data={dt}.create(value))
+                def create(cls,{''.join(f'{name}:{typ},' for name,typ in cfn)}) -> Self:
+                    return cls(data={dt}.create({''.join(f'{name},' for name,typ in cfn)}))
                 """), '    '))
 
     def prereqs(self) -> Iterable[Nested]:
@@ -153,8 +153,8 @@ class Uint(GenSpec):
         self.suggest(f'Uint{self.bit_length}', 100)
 
     @override
-    def create_from(self, names: dict[GenSpec,str]) -> str:
-        return 'int'
+    def create_from(self, names: dict[GenSpec,str]) -> Iterable[tuple[str,str]] | None:
+        return (('value','int'),)
 
     @override
     def generate(self, dest: TextIO, names: dict[GenSpec,str]) -> None:
@@ -189,8 +189,8 @@ class FixRaw(GenSpec):
         self.update_stub(f'F{self.byte_length}Raw', 100)
 
     @override
-    def create_from(self, names: dict[GenSpec,str]) -> str:
-        return 'bytes'
+    def create_from(self, names: dict[GenSpec,str]) -> Iterable[tuple[str,str]] | None:
+        return (('value', 'bytes'),)
 
     @override
     def generate(self, dest: TextIO, names: dict[GenSpec,str]) -> None:
@@ -373,7 +373,7 @@ class _Bounded(GenSpec):
         return _BoundedX(self.inner_type)
 
     @override
-    def create_from(self, names: dict[GenSpec,str]) -> str|None:
+    def create_from(self, names: dict[GenSpec,str]) -> Iterable[tuple[str,str]] | None:
         return get_create_from(self.inner_type, names)
 
     def _restub(self) -> bool:
@@ -413,6 +413,64 @@ def Bounded(bit_length: int, inner_type: Nested) -> _Bounded:
     else:
         return _Bounded((lt,), inner_type)
 
+@dataclass(frozen=True)
+class _ItemCreation:
+    """helper class for create_from stuff when being used recursively"""
+    item_type: Nested
+    names: dict[GenSpec,str]
+    construct_name: str = 'value'
+
+    @cached_property
+    def _icf(self) -> Iterable[tuple[str,str]] | None:
+        return get_create_from(self.item_type, self.names)
+
+    @cached_property
+    def construct(self) -> bool:
+        return self._icf is None
+
+    @cached_property
+    def pairs(self) -> list[tuple[str,str]]:
+        if self.construct:
+            return [(self.construct_name, get_name(self.item_type, self.names))]
+        else:
+            assert self._icf is not None
+            return list(self._icf)
+
+    @cached_property
+    def pairstring(self) -> str:
+        return f'({"".join(f"({repr(name)}, {typ}), " for name,typ in self.pairs)})'
+
+    @cached_property
+    def args(self) -> str:
+        return ''.join(f', {name}:{typ}' for name,typ in self.pairs)
+
+    @cached_property
+    def single(self) -> bool:
+        return len(self.pairs) == 1
+
+    @cached_property
+    def item(self) -> str:
+        if self.single:
+            [(_,typ)] = self.pairs
+            return typ
+        else:
+            return f'tuple[{",".join(typ for _,typ in self.pairs)}]'
+
+
+    def create_line(self, creator: str, varname: str) -> str:
+        if self.construct:
+            return f'{varname}'
+        elif self.single:
+            return f'{creator}.create({varname})'
+        else:
+            return f'{creator}.create(*{varname})'
+
+    def from_pairs(self, creator: str) -> str:
+        if self.construct:
+            return self.construct_name
+        else:
+            return f'{creator}.create({", ".join(name for name,_ in self.pairs)})'
+
 @flyweight
 @dataclass(frozen=True)
 class Sequence(GenSpec):
@@ -424,15 +482,10 @@ class Sequence(GenSpec):
     def __post_init__(self) -> None:
         self.update_stub(self._name_suggestion(), 70)
 
-    def create_from_inner(self, names: dict[GenSpec,str]) -> str|None:
-        return get_create_from(self.item_type, names)
-
     @override
-    def create_from(self, names: dict[GenSpec,str]) -> str:
-        icf = self.create_from_inner(names)
-        if icf is None:
-            icf = get_name(self.item_type, names)
-        return f'Iterable[{icf}]'
+    def create_from(self, names: dict[GenSpec,str]) -> Iterable[tuple[str,str]]:
+        creat = _ItemCreation(self.item_type, names)
+        return (('items', f'Iterable[{creat.item}]'),)
 
     @override
     def suggest(self, name: str, rank: float) -> bool:
@@ -446,24 +499,17 @@ class Sequence(GenSpec):
     @override
     def generate(self, dest: TextIO, names: dict[GenSpec,str]) -> None:
         nn = get_name(self.item_type, names)
-        cft = self.create_from(names)
+        creat = _ItemCreation(self.item_type, names)
+        items_t = f'Iterable[{creat.item}]'
         dest.write(dedent(f"""\
             class {names[self]}(spec._Sequence[{nn}]):
-                _CREATE_FROM = {cft}
+                _CREATE_FROM = (('items', {items_t}),)
                 _ITEM_TYPE = {nn}
+
+                @classmethod
+                def create(cls, items: {items_t}) -> Self:
+                    return cls({creat.create_line(nn,'item')} for item in items)
             """))
-        if self.create_from_inner(names):
-            dest.write(indent(dedent(f"""
-                @classmethod
-                def create(cls, value: {cft}) -> Self:
-                    return cls({nn}.create(v) for v in value)
-                """), '    '))
-        else:
-            dest.write(indent(dedent(f"""
-                @classmethod
-                def create(cls, value: {cft}) -> Self:
-                    return cls(value)
-                """), '    '))
 
     @override
     def prereqs(self) -> Iterable[Nested]:
@@ -480,37 +526,33 @@ class _Struct(GenSpec):
                 typ.suggest(camel_case(name), 30)
 
     @override
+    def create_from(self, names: dict[GenSpec,str]) -> Iterable[tuple[str,str]]:
+        return [(name, _ItemCreation(typ, names).item)
+                for (name, typ) in self.schema]
+
+    @override
     def generate(self, dest: TextIO, names: dict[GenSpec,str]) -> None:
-        memb_names = [(name,
-                       get_name(typ, names),
-                       get_create_from(typ, names))
-                      for name,typ in self.schema]
+        members = [(name,
+                    get_name(typ, names),
+                    _ItemCreation(typ, names),
+                   ) for name,typ in self.schema]
         dest.write(dedent(f"""\
             @dataclass(frozen=True)
             class {names[self]}(spec._StructBase):
                 _member_names: ClassVar[tuple[str,...]] = ({','.join(repr(name) for (name,_) in self.schema)},)
-                _member_types: ClassVar[tuple[type[FullSpec],...]] = ({','.join(tname for _,tname,__ in memb_names)},)
+                _member_types: ClassVar[tuple[type[FullSpec],...]] = ({','.join(tname for _,tname,_ in members)},)
             """))
+        # TODO
+                #_CREATE_FROM: ClassVar[tuple[tuple[str,type[Any]],...]] = ({''.join(f'({repr(name)},{creat.item}),' for name,_,creat in members)})
 
-        for name,tname,_ in memb_names:
+        for name,tname,_ in members:
             dest.write(f'    {name}: {tname}\n')
 
         dest.write(indent(dedent(f"""
             @classmethod
-            def create(cls,
+            def create(cls,{','.join(f'{name}:{creat.item}' for name,_,creat in members)}) -> Self:
+                return cls({', '.join(f'{name}={creat.create_line(tname,name)}' for name,tname,creat in members)})
             """), '    '))
-        for name,tname,cfi in memb_names:
-            dest.write(f'        {name}: {tname if cfi is None else cfi},\n')
-        dest.write('    ) -> Self:\n')
-        dest.write('        return cls(\n')
-        for name,tname,cfi in memb_names:
-            if cfi is None:
-                dest.write(f'            {name} = {name},\n')
-            else:
-                dest.write(f'            {name} = {tname}.create({name}),\n')
-        dest.write('        )\n')
-
-
 
     @override
     def prereqs(self) -> Iterable[Nested]:
@@ -566,6 +608,10 @@ class _SelecteeGen(_SelecteeDefault):
         self.suggest(f'{self.selection}Selection', 30)
 
     @override
+    def create_from(self, names: dict[GenSpec,str]) -> Iterable[tuple[str,str]]:
+        return _ItemCreation(self.data_type, names).pairs
+
+    @override
     def suggest(self, name: str, rank: float) -> bool:
         if self.update_stub(name, rank):
             maybe_suggest(self.data_type, f'{name}Data', 20)
@@ -577,11 +623,19 @@ class _SelecteeGen(_SelecteeDefault):
     def generate(self, dest: TextIO, names: dict[GenSpec,str]) -> None:
         sname = get_name(self.select_type, names)
         dname = get_name(self.data_type, names)
+        assert self.parent is not None, "parent was never set for selectee"
+        pname = names[self.parent]
+        creat = _ItemCreation(self.data_type, names)
         dest.write(dedent(f"""\
             class {names[self]}(spec._SpecificSelectee[{sname}, {dname}]):
                 _SELECT_TYPE = {sname}
                 _DATA_TYPE = {dname}
                 _SELECTOR = {sname}.{self.selection}
+                _CREATE_FROM = {creat.pairstring}
+
+                @classmethod
+                def create(cls{creat.args}) -> '{pname}':
+                    return cls(data={creat.from_pairs(dname)}).parent()
             """))
         self._gen_parent(dest, names)
 
