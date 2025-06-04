@@ -524,9 +524,22 @@ def Struct(**kwargs: Nested) -> _Struct:
 class _SelecteeDefault(GenSpec):
     select_type: Nested
     data_type: Nested
+    parent: '_SelectActual|None' = field(init=False,hash=False,compare=False,default=None)
 
     def __post_init__(self) -> None:
         self.suggest(f'Default{get_stub(self.select_type)}Selection', 30)
+
+    def set_parent(self, parent: '_SelectActual') -> None:
+        assert self.parent is None, "shouldn't set parent twice"
+        object.__setattr__(self, 'parent', parent)
+
+    def _gen_parent(self, dest: TextIO, names: dict[GenSpec,str]) -> None:
+        assert self.parent is not None, "parent was never set"
+        pname = names[self.parent]
+        dest.write(indent(dedent(f"""
+            def parent(self) -> '{pname}':
+                return {pname}(self)
+            """), '    '))
 
     @override
     def generate(self, dest: TextIO, names: dict[GenSpec,str]) -> None:
@@ -537,6 +550,7 @@ class _SelecteeDefault(GenSpec):
                 _SELECT_TYPE = {sname}
                 _DATA_TYPE = {dname}
             """))
+        self._gen_parent(dest, names)
 
     @override
     def prereqs(self) -> Iterable[Nested]:
@@ -569,6 +583,7 @@ class _SelecteeGen(_SelecteeDefault):
                 _DATA_TYPE = {dname}
                 _SELECTOR = {sname}.{self.selection}
             """))
+        self._gen_parent(dest, names)
 
 @dataclass(frozen=True)
 class _SelectActual(GenSpec):
@@ -579,7 +594,10 @@ class _SelectActual(GenSpec):
     def __post_init__(self) -> None:
         sname = get_stub(self.select_type)
         self.update_stub(exact_rstrip(sname, 'Type', 'Obj'), 60)
+        if self.default_type is not None:
+            self.default_type.set_parent(self)
         for name, sel in self.selectees:
+            sel.set_parent(self)
             sel.suggest(camel_case(name) + self.stub, 40)
 
     @override
