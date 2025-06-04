@@ -7,32 +7,41 @@ Most of these are actually implemented by the python cryptography library;
 this module just provides the "glue code" to give a consistent interface
 for how they are used in TLS.
 """
-
+from typing import override, Protocol
+from abc import ABC, abstractmethod, abstractproperty
+from collections.abc import Iterable, Callable
+from functools import cached_property
+from dataclasses import dataclass, field
 from datetime import timedelta, datetime
 from collections import namedtuple
 from random import Random
 from secrets import SystemRandom
 
+from cryptography.hazmat.primitives import _serialization
 from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey, X25519PublicKey
 from cryptography.hazmat.primitives.asymmetric.x448 import X448PrivateKey, X448PublicKey
-from cryptography.hazmat.primitives.hashes import Hash, SHA256, SHA384, SHA512
+from cryptography.hazmat.primitives.hashes import Hash, SHA256, SHA384, SHA512, HashAlgorithm
 from cryptography.hazmat.primitives.asymmetric import ec, rsa
-from cryptography.hazmat.primitives.asymmetric.ec import ECDSA, SECP256R1, SECP384R1, SECP521R1
-from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
-from cryptography.hazmat.primitives.asymmetric.ed448 import Ed448PrivateKey
+from cryptography.hazmat.primitives.asymmetric.ec import ECDSA, SECP256R1, SECP384R1, SECP521R1, EllipticCurvePrivateKey, EllipticCurvePublicKey
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey, Ed25519PublicKey
+from cryptography.hazmat.primitives.asymmetric.ed448 import Ed448PrivateKey, Ed448PublicKey
+from cryptography.hazmat.primitives.asymmetric.rsa import RSAPublicKey, RSAPrivateKey
 from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat, PrivateFormat, NoEncryption, load_der_public_key, load_pem_private_key
 from cryptography.hazmat.primitives.hmac import HMAC
 from cryptography.hazmat.primitives.kdf.hkdf import HKDFExpand
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM, AESCCM, ChaCha20Poly1305
-from cryptography.hazmat.primitives.asymmetric import padding as crypto_padding
+from cryptography.hazmat.primitives.asymmetric import padding as cryptopad
 from cryptography.exceptions import InvalidSignature
 from cryptography import x509
 from cryptography.x509.oid import NameOID
 import pyhpke
 
+from util import kwdict
 from tls_common import *
-from spec import Struct, Bounded, Raw, kwdict
 from tls13_spec import (
+    CertSecrets,
+    EchSecrets,
+    ServerSecrets,
     NamedGroup,
     SignatureScheme,
     CipherSuite,
@@ -40,77 +49,74 @@ from tls13_spec import (
     HpkeKemId,
     HpkeKdfId,
     HpkeAeadId,
+    ECHConfigVersion,
+    PyhpkeKeypair,
+    B32Raw,
+    B32SeqEchSecrets,
     ECHConfig,
+    KeyConfig,
+    Uint8,
+    Uint16,
+    Raw16,
+    Raw8,
+    HpkeSymmetricCipherSuite,
+    B16SeqHpkeSymmetricCipherSuite,
+    String8,
+    B16SeqExtension,
+    Draft24ECHConfig,
+    B16Draft24ECHConfigData,
 )
 
-#TODO this should go away, just experimenting...
-from dataclasses import is_dataclass, fields
-def to_json(x):
-    if isinstance(x, (int, float, str)):
-        return x
-    if isinstance(x, bytes):
-        return x.hex()
-    if is_dataclass(x):
-        d = {}
-        for fld in fields(x):
-            d[fld.name] = to_json(getattr(x, fld.name))
-        return d
-    if isinstance(x, Mapping):
-        d = {}
-        for k,v in x.items():
-            if not isinstance(k, str):
-                raise ValueError(f'json dict keys must be strings; got "{k}"')
-            d[k] = to_json(v)
-        return d
-    if isinstance(x, Iterable):
-        return [to_json(y) for y in x]
-    raise ValueError(f'could not convert to json: "{x}"')
-def from_json(o,cls=Any):
-    if issubclass(cls, (int, float, str)):
-        return cls(o)
-    if issubclass(cls, bytes):
-        return bytes.fromhex(o)
-    if is_dataclass(cls):
-        d = {}
-        for fld in fields(cls):
-            d[fld.name] = from_json(o[fld.name], fld.type)
-        return cls(**d)
-    return o
+_PycaXPublicKey = X25519PublicKey | X448PublicKey
+_PycaXPrivateKey = X25519PrivateKey | X448PrivateKey
 
-@dataclass
-class CertSecrets:
-    sig_alg: SignatureScheme
-    private_key: bytes
-    cert_der: bytes
+_PycaEdPublicKey = Ed25519PublicKey | Ed448PublicKey
+_PycaSigPublicKey = _PycaEdPublicKey | EllipticCurvePublicKey | RSAPublicKey
+_PycaEdPrivateKey = Ed25519PrivateKey | Ed448PrivateKey
+_PycaSigPrivateKey = _PycaEdPrivateKey | EllipticCurvePrivateKey | RSAPrivateKey
 
-@dataclass
-class EchSecrets:
-    config: Struct #ECHConfig
-    private_key: bytes
+class KexAlg(ABC):
+    @abstractmethod
+    def gen_private(self, rgen: Random) -> bytes: ...
+    @abstractmethod
+    def get_public(self, private: bytes) -> bytes: ...
+    @abstractmethod
+    def exchange(self, private: bytes, public: bytes) -> bytes: ...
 
-@dataclass
-class ServerSecrets:
-    cert: CertSecrets
-    eches: list[EchSecrets]
-
-class _XKex:
+@dataclass(frozen=True)
+class _XKex(KexAlg):
     """Key exchange support in X* groups using python cryptography module."""
-    def __init__(self, PrivateKey, PublicKey, genlen):
-        self._get_private = PrivateKey.from_private_bytes
-        self._get_public = PublicKey.from_public_bytes
-        self._genlen = genlen
+    _Private: type[_PycaXPrivateKey]
+    _Public: type[_PycaXPublicKey]
+    _genlen: int
 
-    def gen_private(self, rgen):
+    def _get_private(self, data: bytes) -> _PycaXPrivateKey:
+        return self._Private.from_private_bytes(data)
+
+    def _get_public(self, data: bytes) -> _PycaXPublicKey:
+        return self._Public.from_public_bytes(data)
+
+    @override
+    def gen_private(self, rgen: Random) -> bytes:
         return self._get_private(rgen.randbytes(self._genlen)).private_bytes_raw()
 
-    def get_public(self, private):
+    @override
+    def get_public(self, private: bytes) -> bytes:
         return self._get_private(private).public_key().public_bytes_raw()
 
-    def exchange(self, private, public):
-        return self._get_private(private).exchange(self._get_public(public))
+    @override
+    def exchange(self, private: bytes, public: bytes) -> bytes:
+        prikey = self._get_private(private)
+        pubkey = self._get_public(public)
+        match (prikey, pubkey):
+            case (X25519PrivateKey(), X25519PublicKey()):
+                return prikey.exchange(pubkey)
+            case (X448PrivateKey(), X448PublicKey()):
+                return prikey.exchange(pubkey)
+        raise ValueError("incompatible key types for exchange {prikey} and {pubkey}")
 
 
-def get_kex_alg(group):
+def get_kex_alg(group: NamedGroup) -> KexAlg:
     """Given a NamedGroup, returns an object to do key exchange.
     The returned object kex will have:
         kex.gen_private(rgen) -> private
@@ -126,7 +132,7 @@ def get_kex_alg(group):
             raise ValueError(f"no implementation for key exchange in {group}")
 
 
-DEFAULT_KEX_GROUPS = (
+DEFAULT_KEX_GROUPS: tuple[NamedGroup,...] = (
     NamedGroup.X25519,
     NamedGroup.SECP256R1,
     NamedGroup.X448,
@@ -139,110 +145,168 @@ DEFAULT_KEX_GROUPS = (
     NamedGroup.FFDHE8192,
 )
 
+class SigAlg(ABC):
+    @abstractmethod
+    def gen_private(self, rgen: Random) -> bytes: ...
+    @abstractmethod
+    def get_public(self, privkey: bytes) -> bytes: ...
+    @abstractmethod
+    def sign(self, privkey: bytes, data: bytes) -> bytes: ...
+    @abstractmethod
+    def verify(self, pubkey: bytes, signature: bytes, data: bytes) -> bool: ...
 
-class _PycaSig:
-    def __init__(self, **sig_options):
-        self._sig_options = sig_options
+class _PycaSig(SigAlg):
+    @abstractmethod
+    def _gen_private_pyca(self, rgen: Random) -> _PycaSigPrivateKey: ...
 
+    @override
     def gen_private(self, rgen: Random) -> bytes:
         return pyca_to_bytes(self._gen_private_pyca(rgen))
 
-    def get_public(self, privkey):
+    @override
+    def get_public(self, privkey: bytes) -> bytes:
         return pyca_to_bytes(
-            pyca_from_bytes(privkey, private=True).public_key())
+            pyca_from_bytes_private(privkey).public_key())
 
-    def sign(self, privkey, data):
-        key = pyca_from_bytes(privkey, private=True)
-        return key.sign(
-            data = data,
-            **self._sig_options
-        )
+    @abstractmethod
+    def _sign_pyca(self, privkey: _PycaSigPrivateKey, data: bytes) -> bytes: ...
 
-    def verify(self, pubkey, signature, data):
-        pk = pyca_from_bytes(pubkey)
+    @override
+    def sign(self, privkey: bytes, data: bytes) -> bytes:
+        return self._sign_pyca(pyca_from_bytes_private(privkey), data)
+
+    @abstractmethod
+    def _verify_pyca(self, pubkey: _PycaSigPublicKey, signature: bytes, data: bytes) -> None: ...
+
+    @override
+    def verify(self, pubkey: bytes, signature: bytes, data: bytes) -> bool:
+        pk = pyca_from_bytes_public(pubkey)
         try:
-            pk.verify(
-                signature = signature,
-                data      = data,
-                **self._sig_options
-            )
+            self._verify_pyca(pk, signature, data)
         except InvalidSignature:
             return False
         return True
 
-
+@dataclass(frozen=True)
 class _PycaECDSA(_PycaSig):
-    def __init__(self, curve, hash_alg, gen_bits: int):
-        super().__init__(
-            signature_algorithm = ECDSA(hash_alg(), deterministic_signing=True),
-        )
-        self._curve = curve
-        self._gen_bits = gen_bits
+    curve: ec.EllipticCurve
+    hash_alg: HashAlgorithm
+    gen_bits: int
+    sig_alg: ec.EllipticCurveSignatureAlgorithm = field(init=False)
 
-    def _gen_private_pyca(self, rgen: Random) -> bytes:
+    def __post_init__(self) -> None:
+        object.__setattr__(self, 'sig_alg', ECDSA(self.hash_alg, deterministic_signing=True))
+
+    @override
+    def _gen_private_pyca(self, rgen: Random) -> EllipticCurvePrivateKey:
         for _ in range(128):
             try:
-                return ec.derive_private_key(rgen.randrange(2**self._gen_bits), self._curve())
+                return ec.derive_private_key(rgen.randrange(2**self.gen_bits), self.curve)
             except ValueError:
                 continue # try again
         raise ValueError("failed EC private key generation 128 times")
 
+    @override
+    def _sign_pyca(self, privkey: _PycaSigPrivateKey, data: bytes) -> bytes:
+        if isinstance(privkey, EllipticCurvePrivateKey):
+            return privkey.sign(data, self.sig_alg)
+        raise ValueError(f"invalid private key for PycaECDSA: {privkey}")
 
+    @override
+    def _verify_pyca(self, pubkey: _PycaSigPublicKey, signature: bytes, data: bytes) -> None:
+        if isinstance(pubkey, EllipticCurvePublicKey):
+            return pubkey.verify(signature, data, self.sig_alg)
+        raise ValueError(f"invalid public key for PycaECDSA: {pubkey}")
+
+@dataclass(frozen=True)
 class _PycaEdDSA(_PycaSig):
-    def __init__(self, KeyClass, keylen: int):
-        super().__init__()
-        self._KeyClass = KeyClass
-        self._keylen = keylen
+    _KeyClass: type[_PycaEdPrivateKey]
+    _keylen: int
 
-    def _gen_private_pyca(self, rgen: Random) -> bytes:
-        return self._KeyClass.generate(rgen.randbytes(self._keylen))
+    @override
+    def _gen_private_pyca(self, rgen: Random) -> _PycaSigPrivateKey:
+        # XXX rgen not actually used
+        return self._KeyClass.generate()
 
+    @override
+    def _sign_pyca(self, privkey: _PycaSigPrivateKey, data: bytes) -> bytes:
+        if isinstance(privkey, _PycaEdPrivateKey):
+            return privkey.sign(data)
+        raise ValueError(f"invalid private key for PycaEdDSA: {privkey}")
 
+    @override
+    def _verify_pyca(self, pubkey: _PycaSigPublicKey, signature: bytes, data: bytes) -> None:
+        if isinstance(pubkey, _PycaEdPublicKey):
+            return pubkey.verify(signature, data)
+        raise ValueError(f"invalid public key for PycaEdDSA: {pubkey}")
+
+def _pss_padder(hash_alg: HashAlgorithm) -> cryptopad.AsymmetricPadding:
+    return cryptopad.PSS(
+        mgf         = cryptopad.MGF1(hash_alg),
+        salt_length = cryptopad.PSS.DIGEST_LENGTH,
+    )
+
+def _pkcs_padder(hash_alg: HashAlgorithm) -> cryptopad.AsymmetricPadding:
+    return cryptopad.PKCS1v15()
+
+@dataclass(frozen=True)
 class _PycaRSA(_PycaSig):
-    @classmethod
-    def pss(cls, hash_alg):
-        return cls(hash_alg=hash_alg, pad=crypto_padding.PSS(
-            mgf         = crypto_padding.MGF1(hash_alg()),
-            salt_length = crypto_padding.PSS.DIGEST_LENGTH,
-        ))
+    padder: Callable[[HashAlgorithm], cryptopad.AsymmetricPadding]
+    hash_alg: HashAlgorithm
 
-    @classmethod
-    def pkcs(cls, hash_alg):
-        return cls(hash_alg=hash_alg, pad=crypto_padding.PKCS1v15())
+    @property
+    def padding(self) -> cryptopad.AsymmetricPadding:
+        return self.padder(self.hash_alg)
 
-    def __init__(self, hash_alg, pad):
-        super().__init__(
-            padding   = pad,
-            algorithm = hash_alg(),
-        )
-
-    def _gen_private_pyca(self, rgen: Random) -> bytes:
+    @override
+    def _gen_private_pyca(self, rgen: Random) -> rsa.RSAPrivateKey:
         # XXX doesn't actually use rgen!!
         return rsa.generate_private_key(
             public_exponent = 65537,
             key_size        = 4096,
         )
 
+    @override
+    def _sign_pyca(self, privkey: _PycaSigPrivateKey, data: bytes) -> bytes:
+        if isinstance(privkey, rsa.RSAPrivateKey):
+            return privkey.sign(data, self.padding, self.hash_alg)
+        raise ValueError(f"invalid private key for RSA: {privkey}")
 
-def pyca_to_bytes(key):
-    if hasattr(key, 'private_bytes'):
+    @override
+    def _verify_pyca(self, pubkey: _PycaSigPublicKey, signature: bytes, data: bytes) -> None:
+        if isinstance(pubkey, rsa.RSAPublicKey):
+            return pubkey.verify(signature, data, self.padding, self.hash_alg)
+        raise ValueError(f"invalid public key for PycaEdDSA: {pubkey}")
+
+
+def pyca_to_bytes(key: _PycaSigPrivateKey|_PycaSigPublicKey) -> bytes:
+    if isinstance(key, _PycaSigPrivateKey):
         return key.private_bytes(
             Encoding.PEM, PrivateFormat.PKCS8, NoEncryption())
     else:
         return key.public_bytes(Encoding.DER,
                                 PublicFormat.SubjectPublicKeyInfo)
 
-def pyca_from_bytes(raw, private=False):
-    if private:
-        return load_pem_private_key(raw, None)
-    else:
-        return load_der_public_key(raw)
+def pyca_from_bytes_public(raw: bytes) -> _PycaSigPublicKey:
+    pubkey = load_der_public_key(raw)
+    if isinstance(pubkey, _PycaSigPublicKey):
+        return pubkey
+    raise ValueError("unrecognized key type:", pubkey)
 
-def extract_x509_pubkey(raw_cert):
+def pyca_from_bytes_private(raw: bytes) -> _PycaSigPrivateKey:
+    prikey = load_pem_private_key(raw, None)
+    if isinstance(prikey, _PycaSigPrivateKey):
+        return prikey
+    raise ValueError("unrecognized key type:", prikey)
+
+def extract_x509_pubkey(raw_cert: bytes) -> bytes:
     """Given a DER-encoded certificate, extracts bytes of the public key."""
-    return pyca_to_bytes(x509.load_der_x509_certificate(raw_cert).public_key())
+    pubkey = x509.load_der_x509_certificate(raw_cert).public_key()
+    if isinstance(pubkey, _PycaSigPublicKey):
+        return pyca_to_bytes(pubkey)
+    raise ValueError("unrecognized key type in x509 cert:", pubkey)
 
-def get_sig_alg(scheme):
+def get_sig_alg(scheme: SignatureScheme) -> SigAlg:
     """Given a SignatureScheme, returns an object to do digital signature verification.
     The returned object sigscheme will have:
         sigscheme.gen_private() -> privkey
@@ -254,11 +318,11 @@ def get_sig_alg(scheme):
     """
     match scheme:
         case SignatureScheme.ECDSA_SECP256R1_SHA256:
-            return _PycaECDSA(SECP256R1, SHA256, 256)
+            return _PycaECDSA(SECP256R1(), SHA256(), 256)
         case SignatureScheme.ECDSA_SECP384R1_SHA384:
-            return _PycaECDSA(SECP384R1, SHA384, 384)
+            return _PycaECDSA(SECP384R1(), SHA384(), 384)
         case SignatureScheme.ECDSA_SECP521R1_SHA512:
-            return _PycaECDSA(SECP521R1, SHA512, 512)
+            return _PycaECDSA(SECP521R1(), SHA512(), 512)
 
         case SignatureScheme.ED25519:
             return _PycaEdDSA(Ed25519PrivateKey, 32)
@@ -266,24 +330,24 @@ def get_sig_alg(scheme):
             return _PycaEdDSA(Ed448PrivateKey, 57)
 
         case (SignatureScheme.RSA_PSS_RSAE_SHA256 | SignatureScheme.RSA_PSS_PSS_SHA256):
-            return _PycaRSA.pss(SHA256)
-        case (SignatureScheme.RSA_PSS_RSAE_SHA384 | SignatureScheme.RSA_PSS_PSS_SHA384):
-            return _PycaRSA.pss(SHA384)
-        case (SignatureScheme.RSA_PSS_RSAE_SHA512 | SignatureScheme.RSA_PSS_PSS_SHA512):
-            return _PycaRSA.pss(SHA512)
+            return _PycaRSA(_pss_padder, SHA256())
+        case (SignatureScheme.RSA_PSS_RSAE_SHA384 | SignatureScheme.RSA_PSS_PSS_SHA384()):
+            return _PycaRSA(_pss_padder, SHA384())
+        case (SignatureScheme.RSA_PSS_RSAE_SHA512 | SignatureScheme.RSA_PSS_PSS_SHA512()):
+            return _PycaRSA(_pss_padder, SHA512())
 
         case SignatureScheme.RSA_PKCS1_SHA256:
-            return _PycaRSA.pkcs(SHA256)
+            return _PycaRSA(_pkcs_padder, SHA256())
         case SignatureScheme.RSA_PKCS1_SHA384:
-            return _PycaRSA.pkcs(SHA384)
+            return _PycaRSA(_pkcs_padder, SHA384())
         case SignatureScheme.RSA_PKCS1_SHA512:
-            return _PycaRSA.pkcs(SHA512)
+            return _PycaRSA(_pkcs_padder, SHA512())
 
         case _:
             raise ValueError(f"no implementation for signatures in {scheme}")
 
 
-DEFAULT_SIGNATURE_SCHEMES = (
+DEFAULT_SIGNATURE_SCHEMES: tuple[SignatureScheme,...] = (
 	SignatureScheme.ECDSA_SECP256R1_SHA256,
 	SignatureScheme.ECDSA_SECP384R1_SHA384,
 	SignatureScheme.ECDSA_SECP521R1_SHA512,
@@ -300,52 +364,72 @@ DEFAULT_SIGNATURE_SCHEMES = (
 	SignatureScheme.RSA_PKCS1_SHA512,
 )
 
+class HashObject(ABC):
+    @abstractmethod
+    def update(self, msg: bytes) -> None: ...
 
-class _PycaHash:
-    def __init__(self, hash_alg):
-        self._hash_alg = hash_alg
+    @abstractmethod
+    def digest(self) -> bytes: ...
 
+class Hasher(ABC):
+    @abstractproperty
+    def digest_size(self) -> int: ...
+
+    @abstractmethod
+    def hasher(self, msg: bytes = b'') -> HashObject: ...
+
+    @abstractmethod
+    def hmac_hash(self, key: bytes, msg: bytes) -> bytes: ...
+
+    @abstractmethod
+    def hkdf_expand(self, prk: bytes, info: bytes, length: int) -> bytes: ...
+
+@dataclass
+class _PycaHasher(HashObject):
+    hash_obj: Hash
+
+    def __init__(self, hash_obj: Hash, msg: bytes) -> None:
+        self.hash_obj = hash_obj
+        if msg:
+            self.update(msg)
+
+    @override
+    def update(self, msg: bytes) -> None:
+        self.hash_obj.update(msg)
+
+    @override
+    def digest(self) -> bytes:
+        return self.hash_obj.copy().finalize()
+
+@dataclass(frozen=True)
+class _PycaHash(Hasher):
+    hash_alg: HashAlgorithm
+
+    @override
     @property
-    def digest_size(self):
-        return self._hash_alg.digest_size
+    def digest_size(self) -> int:
+        return self.hash_alg.digest_size
 
-    def hasher(self, msg=b''):
-        return _PycaHasher(Hash(self._hash_alg), msg)
+    @override
+    def hasher(self, msg: bytes = b'') -> HashObject:
+        return _PycaHasher(Hash(self.hash_alg), msg)
 
-    def hmac_hash(self, key, msg):
+    @override
+    def hmac_hash(self, key: bytes, msg: bytes) -> bytes:
         # rfc2104
-        h = HMAC(key=key, algorithm=self._hash_alg)
+        h = HMAC(key=key, algorithm=self.hash_alg)
         h.update(msg)
         return h.finalize()
 
-    def hkdf_expand(self, prk, info, length):
+    @override
+    def hkdf_expand(self, prk: bytes, info: bytes, length: int) -> bytes:
         # rfc5869
-        h = HKDFExpand(algorithm=self._hash_alg, length=length, info=info)
+        h = HKDFExpand(algorithm=self.hash_alg, length=length, info=info)
         return h.derive(key_material=prk)
 
 
-class _PycaHasher:
-    def __init__(self, hash_obj, msg):
-        self._hash_obj = hash_obj
-        if msg: self._hash_obj.update(msg)
-
-    def update(self, msg):
-        self._hash_obj.update(msg)
-
-    def digest(self):
-        return self._hash_obj.copy().finalize()
-
-
-def get_hash_alg(cipher_suite):
+def get_hash_alg(cipher_suite: CipherSuite) -> Hasher:
     """Given a CipherSuite, returns an object to do hashing.
-    The returned object hash will have the following:
-        hash.digest_size : int
-        hash.hasher(msg[*]=b'') -> hash_object
-        hash_object.update(msg[*]) -> None
-        hash_object.digest() -> bytes[digest_size]
-        hash.hmac_hash(key[key_size], msg[*]) -> bytes[digest_size]
-        hash.hkdf_expand(prk[*], info[*], length) -> bytes[length]
-    (All values are bytes, with sizes as specified in [] when relevant.)
     """
     match cipher_suite:
         case (CipherSuite.TLS_AES_128_GCM_SHA256
@@ -355,44 +439,63 @@ def get_hash_alg(cipher_suite):
             return _PycaHash(SHA256())
         case CipherSuite.TLS_AES_256_GCM_SHA384:
             return _PycaHash(SHA384())
-        case _:
-            raise ValueError(f"no hash implementation for cipher suite {cipher_suite}")
+    raise ValueError(f"no hash implementation for cipher suite {cipher_suite}")
 
 
-class _PycaAead:
-    def __init__(self, cipher_alg, key_len, iv_len=12, tag_len=16):
-        self._cipher_alg = cipher_alg
-        self._key_len = key_len
-        self._iv_len = iv_len
-        self._tag_len = tag_len
+class AeadCipher(ABC):
+    @abstractproperty
+    def key_length(self) -> int: ...
 
+    @abstractproperty
+    def iv_length(self) -> int: ...
+
+    @abstractmethod
+    def ctext_size(self, ptext_size: int) -> int: ...
+
+    @abstractmethod
+    def encrypt(self, key: bytes, iv: bytes, ptext: bytes, adata: bytes) -> bytes: ...
+
+    @abstractmethod
+    def decrypt(self, key: bytes, iv: bytes, ctext: bytes, adata: bytes) -> bytes: ...
+
+class _PycaCipher(Protocol):
+    def encrypt(self, iv: bytes, ptext: bytes, adata: bytes) -> bytes: ...
+    def decrypt(self, iv: bytes, ctext: bytes, adata: bytes) -> bytes: ...
+
+
+@dataclass(frozen=True)
+class _PycaAead(AeadCipher):
+    cipher_alg: Callable[[bytes], _PycaCipher]
+    key_len: int
+    iv_len: int = 12
+    tag_len: int = 16
+
+    @override
     @property
-    def key_length(self):
-        return self._key_len
+    def key_length(self) -> int:
+        return self.key_len
 
+    @override
     @property
-    def iv_length(self):
-        return self._iv_len
+    def iv_length(self) -> int:
+        return self.iv_len
 
-    def ctext_size(self, ptext_size):
-        return ptext_size + self._tag_len
+    @override
+    def ctext_size(self, ptext_size: int) -> int:
+        return ptext_size + self.tag_len
 
-    def encrypt(self, key, iv, ptext, adata):
-        return self._cipher_alg(key).encrypt(iv, ptext, adata)
+    @override
+    def encrypt(self, key: bytes, iv: bytes, ptext: bytes, adata: bytes) -> bytes:
+        return self.cipher_alg(key).encrypt(iv, ptext, adata)
 
-    def decrypt(self, key, iv, ctext, adata):
-        return self._cipher_alg(key).decrypt(iv, ctext, adata)
+    @override
+    def decrypt(self, key: bytes, iv: bytes, ctext: bytes, adata: bytes) -> bytes:
+        return self.cipher_alg(key).decrypt(iv, ctext, adata)
 
 
-def get_cipher_alg(cipher_suite):
+def get_cipher_alg(cipher_suite: CipherSuite) -> AeadCipher:
     """Given a CipherSuite, returns an object to do encryption.
     The returned object cipher will have the following:
-        cipher.key_length  : int
-        cipher.iv_length   : int
-        cipher.ctext_size(ptext_size: int) -> int
-        cipher.encrypt(key[key_length], iv[iv_length], ptext[ptext_size], adata[*])
-            -> ctext[ctext_size(ptext_size)]
-        cipher.decrypt(key[key_length], iv[iv_length], ctext[*], adata[*]) -> ptext[*]
     (All values are bytes, with sizes as specified in [] when relevant.)
     """
     match cipher_suite:
@@ -406,11 +509,10 @@ def get_cipher_alg(cipher_suite):
             return _PycaAead(AESCCM, 16)
         case CipherSuite.TLS_AES_128_CCM_8_SHA256:
             return _PycaAead(AESCCM, 16, tag_len=8)
-        case _:
-            raise ValueError(f"no cipher implementation for cipher suite {cipher_suite}")
+    raise ValueError(f"no cipher implementation for cipher suite {cipher_suite}")
 
 
-DEFAULT_CIPHER_SUITES = (
+DEFAULT_CIPHER_SUITES: tuple[CipherSuite, ...] = (
     CipherSuite.TLS_AES_256_GCM_SHA384,
     CipherSuite.TLS_CHACHA20_POLY1305_SHA256,
     CipherSuite.TLS_AES_128_GCM_SHA256,
@@ -418,111 +520,127 @@ DEFAULT_CIPHER_SUITES = (
 )
 
 
+class KeyEncaps(ABC):
+    @abstractmethod
+    def gen_private(self, rgen: Random) -> bytes: ...
+
+    @abstractmethod
+    def get_public(self, private: bytes) -> bytes: ...
+
 def _get_pyhpke_cs(
-    kem_id = pyhpke.KEMId.DHKEM_X25519_HKDF_SHA256,
-    kdf_id = pyhpke.KDFId.HKDF_SHA256,
-    aead_id = pyhpke.AEADId.CHACHA20_POLY1305,
+    kem_id: pyhpke.KEMId = pyhpke.KEMId.DHKEM_X25519_HKDF_SHA256,
+    kdf_id: pyhpke.KDFId = pyhpke.KDFId.HKDF_SHA256,
+    aead_id: pyhpke.AEADId = pyhpke.AEADId.CHACHA20_POLY1305,
 ) -> pyhpke.CipherSuite:
     return pyhpke.CipherSuite.new(kem_id, kdf_id, aead_id)
 
-_Pyhpke_Keypair = Struct(
-    private = Bounded(2, Raw),
-    public  = Bounded(2, Raw),
-)
-
-class _Pyhpke_Kem:
+class _Pyhpke_Kem(KeyEncaps):
     def __init__(self, kem_id: pyhpke.KEMId):
         self._kem = _get_pyhpke_cs(kem_id=kem_id).kem
 
+    @override
     def gen_private(self, rgen: Random) -> bytes:
         keypair = self._kem.derive_key_pair(rgen.randbytes(64))
-        return _Pyhpke_Keypair.pack(
-            private = keypair.private_key.to_private_bytes(),
-            public  = keypair.public_key.to_public_bytes(),
-        )
+        return PyhpkeKeypair(
+            private = B32Raw(keypair.private_key.to_private_bytes()),
+            public  = B32Raw(keypair.public_key.to_public_bytes()),
+        ).pack()
 
+    @override
     def get_public(self, private: bytes) -> bytes:
-        return _Pyhpke_Keypair.unpack(private).public
+        return PyhpkeKeypair.unpack(private).public
 
-
-def get_kem_alg(kem_id: HpkeKemId) -> _Pyhpke_Kem:
+def get_kem_alg(kem_id: HpkeKemId) -> KeyEncaps:
     """Given a kem_id, returns an object to do key encapsulation.
-    The returned object kex will have:
-        kem.gen_private(rgen) -> private
-        kem.get_public(private) -> public
     """
     return _Pyhpke_Kem(pyhpke.KEMId(int(kem_id)))
 
-DEFAULT_KEM = HpkeKemId.DHKEM_X25519_HKDF_SHA256
+DEFAULT_KEM: HpkeKemId = HpkeKemId.DHKEM_X25519_HKDF_SHA256
 
 
-# TODO cipher suites
-DEFAULT_HPKE_CSUITES = [
-    (HpkeKdfId.HKDF_SHA256, HpkeAeadId.AES_256_GCM),
-    (HpkeKdfId.HKDF_SHA256, HpkeAeadId.CHACHA20_POLY1305),
-]
+DEFAULT_HPKE_CSUITES: tuple[HpkeSymmetricCipherSuite,...] = (
+    HpkeSymmetricCipherSuite(
+        kdf_id  = HpkeKdfId.HKDF_SHA256,
+        aead_id = HpkeAeadId.AES_256_GCM,
+    ),
+    HpkeSymmetricCipherSuite(
+        kdf_id  = HpkeKdfId.HKDF_SHA256,
+        aead_id = HpkeAeadId.CHACHA20_POLY1305,
+    ),
+)
 
 
+@dataclass
 class StreamCipher:
-    def __init__(self, cipher, hash_alg, secret):
-        self._cipher = cipher
+    cipher: AeadCipher
+    hash_alg: Hasher
+    secret: bytes
+    counter: int = 0
+
+    @cached_property
+    def key(self) -> bytes:
         # rfc8446, sect 7.3
-        self._key = hkdf_expand_label(
-            hash_alg = hash_alg,
-            secret   = secret,
+        return hkdf_expand_label(
+            hash_alg = self.hash_alg,
+            secret   = self.secret,
             label    = b'key',
             cont     = b'',
-            length   = self._cipher.key_length,
-            )
-        self._iv = hkdf_expand_label(
-            hash_alg = hash_alg,
-            secret   = secret,
+            length   = self.cipher.key_length,
+        )
+
+    @cached_property
+    def iv(self) -> bytes:
+        # rfc8446, sect 7.3
+        return hkdf_expand_label(
+            hash_alg = self.hash_alg,
+            secret   = self.secret,
             label    = b'iv',
             cont     = b'',
-            length   = self._cipher.iv_length,
-            )
-        logger.info(f'started StreamCipher with key {self._key.hex()} and iv {self._iv.hex()}')
-        self._counter = 0
+            length   = self.cipher.iv_length,
+        )
 
-    def _next_nonce(self):
+    def __post_init__(self) -> None:
+        logger.info(f'started StreamCipher with key {self.key.hex()} and iv {self.iv.hex()}')
+
+    def _next_nonce(self) -> bytes:
         nonce = bytes(a ^ b for a,b in
-                      zip(self._iv, self._counter.to_bytes(len(self._iv))))
-        self._counter += 1
+                      zip(self.iv, self.counter.to_bytes(len(self.iv))))
+        self.counter += 1
         return nonce
 
-    def encrypt(self, ptext, adata):
-        assert self._key is not None, "need to rekey before encrypting"
-        return self._cipher.encrypt(
-            key   = self._key,
+    def encrypt(self, ptext: bytes, adata: bytes) -> bytes:
+        assert self.key is not None, "need to rekey before encrypting"
+        return self.cipher.encrypt(
+            key   = self.key,
             iv    = self._next_nonce(),
             ptext = ptext,
             adata = adata,
             )
 
-    def decrypt(self, ctext, adata):
-        assert self._key is not None, "need to rekey before decrypting"
-        return self._cipher.decrypt(
-            key   = self._key,
+    def decrypt(self, ctext: bytes, adata: bytes) -> bytes:
+        assert self.key is not None, "need to rekey before decrypting"
+        return self.cipher.decrypt(
+            key   = self.key,
             iv    = self._next_nonce(),
             ctext = ctext,
             adata = adata,
             )
 
 
-def hkdf_extract(hash_alg, salt, ikm):
+def hkdf_extract(hash_alg: Hasher, salt: bytes, ikm: bytes) -> bytes:
     # rfc5869
     return hash_alg.hmac_hash(key=salt, msg=ikm)
 
-def hkdf_expand_label(hash_alg, secret, label, cont, length):
+def hkdf_expand_label(hash_alg: Hasher, secret: bytes, label: bytes, cont: bytes, length: int) -> bytes:
     # rfc8446 sect 7.1
-    info = HkdfLabel.pack({
-        'length'  : length,
-        'label'   : b'tls13 ' + label,
-        'context' : cont,
-    })
+    info = HkdfLabel(
+        length  = Uint16(length),
+        label   = Raw8(b'tls13 ' + label),
+        context = Raw8(cont),
+    ).pack()
     return hash_alg.hkdf_expand(prk=secret, info=info, length=length)
 
-def derive_secret(hash_alg, secret, label, msg_digest):
+def derive_secret(hash_alg: Hasher, secret: bytes, label: bytes, msg_digest: bytes) -> bytes:
     # rfc8446 sect 7.1
     return hkdf_expand_label(hash_alg, secret=secret, label=label,
                              cont=msg_digest, length=hash_alg.digest_size)
@@ -547,14 +665,14 @@ def gen_cert(name: str, sig_alg: SignatureScheme, rgen: Random) -> CertSecrets:
         .not_valid_before(datetime(year=2025,month=1,day=1))
         .not_valid_after(datetime(year=2035,month=1,day=1))
         .serial_number(serialno)
-        .public_key(pyca_from_bytes(sigscheme.get_public(private_key)))
+        .public_key(pyca_from_bytes_public(sigscheme.get_public(private_key)))
         .add_extension(x509.SubjectAlternativeName([x509.DNSName(name)]),critical=False)
         .add_extension(x509.BasicConstraints(ca=False,path_length=None), critical=True)
-        .sign(private_key=pyca_from_bytes(private_key, private=True), algorithm=SHA256()))
+        .sign(private_key=pyca_from_bytes_private(private_key), algorithm=SHA256()))
     return CertSecrets(
         sig_alg = sig_alg,
-        private_key = private_key,
-        cert_der = cert.public_bytes(Encoding.DER),
+        private_key = B32Raw(private_key),
+        cert_der = B32Raw(cert.public_bytes(Encoding.DER)),
     )
 
 
@@ -563,29 +681,27 @@ def gen_ech_config(
     config_id: int,
     maximum_name_length: int,
     kem_id: HpkeKemId,
-    cipher_suites: Iterable[tuple[HpkeKdfId,HpkeAeadId]],
+    cipher_suites: Iterable[HpkeSymmetricCipherSuite],
     rgen: Random,
-) -> tuple[Struct, bytes]:
+) -> EchSecrets:
     """Generates an ECHConfig struct and corresponding private key."""
     kem = get_kem_alg(kem_id)
     seckey = kem.gen_private(rgen)
     pubkey = kem.get_public(seckey)
-    config = ECHConfig.prepack(
-        version = 0xfe0d,
-        contents = kwdict(
-            key_config = kwdict(
-                config_id = config_id,
+    return EchSecrets(
+        config = ECHConfig(Draft24ECHConfig(data=B16Draft24ECHConfigData(
+            key_config = KeyConfig(
+                config_id = Uint8(config_id),
                 kem_id = kem_id,
-                public_key = pubkey,
-                cipher_suites = cipher_suites,
+                public_key = Raw16(pubkey),
+                cipher_suites = B16SeqHpkeSymmetricCipherSuite(cipher_suites),
             ),
-            maximum_name_length = maximum_name_length,
-            public_name = public_name,
-            extensions = [],
-        ),
+            maximum_name_length = Uint8(maximum_name_length),
+            public_name = String8(public_name),
+            extensions = B16SeqExtension([]),
+        ))),
+        private_key = B32Raw(seckey),
     )
-    return EchSecrets(config=config, private_key=seckey)
-
 
 def gen_server_secrets(
     name: str ='localhost',
@@ -593,7 +709,7 @@ def gen_server_secrets(
     config_id: int|None = None, # default, choose randomly
     maximum_name_length: int = 128,
     kem_id: HpkeKemId = DEFAULT_KEM,
-    cipher_suites: Iterable[tuple[HpkeKdfId,HpkeAeadId]] = DEFAULT_HPKE_CSUITES,
+    cipher_suites: Iterable[HpkeSymmetricCipherSuite] = DEFAULT_HPKE_CSUITES,
     rgen: Random|None = None, # default, SystemRandom
 ) -> ServerSecrets:
     """Generates a fresh certificate and ECH config."""
@@ -604,5 +720,5 @@ def gen_server_secrets(
 
     return ServerSecrets(
         cert = gen_cert(name, sig_alg, rgen),
-        eches = [gen_ech_config(name, config_id, maximum_name_length, kem_id, cipher_suites, rgen)],
+        eches = B32SeqEchSecrets([gen_ech_config(name, config_id, maximum_name_length, kem_id, cipher_suites, rgen)]),
     )

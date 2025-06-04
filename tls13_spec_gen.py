@@ -267,11 +267,11 @@ specs: dict[str, GenSpec] = kwdict(
     ),
 
     ECHConfigVersion = EnumSpec(16)(
-        DRAFT24 = 0xfe0d,
+        DRAFT_24 = 0xfe0d,
     ),
 
     ECHConfig = Select('ECHConfigVersion', 16)(
-        DRAFT24 = Struct(
+        DRAFT_24 = Struct(
             key_config = Struct (
                 config_id     = Uint(8),
                 kem_id        = 'HpkeKemId',
@@ -379,6 +379,29 @@ specs: dict[str, GenSpec] = kwdict(
             payload = 'Alert',
         ),
     ),
+
+    CertSecrets = Struct(
+        sig_alg = 'SignatureScheme',
+        private_key = Bounded(32, Raw),
+        cert_der = Bounded(32, Raw),
+    ),
+
+    EchSecrets = Struct(
+        config = 'ECHConfig',
+        private_key = Bounded(32, Raw),
+    ),
+
+    ServerSecrets = Struct(
+        cert = 'CertSecrets',
+        eches = Bounded(32, Sequence('EchSecrets')),
+    ),
+
+    PyhpkeKeypair = Struct(
+        private = Bounded(32, Raw),
+        public = Bounded(32, Raw),
+    ),
+
+    #### XXX remove below TODO
 
     Days = EnumSpec(8)(
         Monday = 1,
