@@ -9,6 +9,9 @@ from textwrap import dedent
 
 type Json = int | float | str | bool | None | list[Json] | dict[str, Json]
 
+class UnpackError(ValueError):
+    pass
+
 def force_read(src: BinaryIO, size: int) -> bytes:
     got = src.read(size)
     if len(got) != size:

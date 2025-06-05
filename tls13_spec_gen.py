@@ -411,6 +411,17 @@ specs: dict[str, GenSpec] = kwdict(
         creation = Uint(64),
     ),
 
+    ServerTicketPlaintext = Struct(
+        cipher_suite = 'CipherSuite',
+        expiration = Uint(8),
+        psk = Bounded(16, Raw),
+    ),
+
+    ServerTicketCiphertext = Struct(
+        inner_ciphertext = Bounded(16, Raw),
+        iv = Bounded(8, Raw),
+    ),
+
 
     #### XXX remove below TODO
 

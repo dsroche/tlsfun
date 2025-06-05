@@ -713,25 +713,25 @@ class _SelectActual(GenSpec):
         sname = get_name(self.select_type, names)
         dname = 'None' if self.default_type is None else names[self.default_type]
         tname = f'{names[self]}Variants'
+        sel_types: list[_SelecteeDefault] = [s for _,s in self.selectees]
+        if self.default_type is not None:
+            sel_types.append(self.default_type)
         dest.write(dedent(f"""
-            type {tname} = {' | '.join(str(names[s]) for _,s in self.selectees)}
+            type {tname} = {' | '.join(names[s] for s in sel_types)}
 
             class {names[self]}(spec._Select[{sname}]):
                 _SELECT_TYPE = {sname}
                 _DEFAULT_TYPE = {dname}
-                _SELECTEES = {{
-            """))
-        for key, s in self.selectees:
-            dest.write(f"        {sname}.{key}: {names[s]},\n")
-        dest.write("    }\n")
-        dest.write(indent("    ", dedent(f"""\
+                _SELECTEES = {{{', '.join(f'{sname}.{key}:{names[s]}' for key,s in self.selectees)}}}
+
                 def __init__(self, value: {tname}) -> None:
                     super().__init__(value)
                     self._value: {tname} = value
+
                 @property
-                def value(self) -> {tname}:
+                def variant(self) -> {tname}:
                     return self._value
-            """)))
+            """))
 
     @override
     def prereqs(self) -> Iterable[Nested]:

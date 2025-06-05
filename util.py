@@ -5,6 +5,33 @@ from typing import Any
 from dataclasses import dataclass, field
 import functools
 import base64
+import pprint
+
+type _Pretty = str | list[_Pretty] | dict[str, _Pretty]
+
+def _pretty_prep(obj: Any, byteslen: int|None=None) -> _Pretty :
+    if isinstance(obj, bytes):
+        if byteslen is not None and len(obj) > byteslen:
+            return f"{obj[:byteslen//2].hex()}...{obj[-byteslen//2:].hex()}"
+        else:
+            return obj.hex()
+    elif isinstance(obj, tuple):
+        if hasattr(obj, '_asdict'):
+            return _pretty_prep(obj._asdict(), byteslen)
+        else:
+            return [_pretty_prep(value, byteslen) for value in obj]
+    elif isinstance(obj, dict):
+        return {str(key): _pretty_prep(value, byteslen) for key,value in obj.items()}
+    elif isinstance(obj, list):
+        return [_pretty_prep(value, byteslen) for value in obj]
+    else:
+        return str(obj)
+
+def pp(obj:Any, byteslen:int=32, **kwargs: Any) -> None:
+    pprint.pp(_pretty_prep(obj, byteslen), **kwargs)
+
+def pformat(obj:Any, byteslen:int=32, **kwargs: Any) -> str:
+    return pprint.pformat(_pretty_prep(obj, byteslen), sort_dicts=False, **kwargs)
 
 class SetOnce[T]:
     """Descriptor that allows setting but not getting an attribute value."""

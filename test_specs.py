@@ -5,7 +5,10 @@ from io import BytesIO
 import spec
 from spec import Spec, FullSpec, Json
 from tls13_spec import *
-import util, tls_common, tls_crypto
+import util
+import tls_common
+import tls_crypto
+import tls_keycalc
 
 
 def check[T](a: T, b: T) -> None:
