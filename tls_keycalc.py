@@ -10,7 +10,6 @@ from cryptography.hazmat.primitives.ciphers.aead import ChaCha20Poly1305
 from cryptography.exceptions import InvalidTag
 
 from util import b64enc, b64dec
-from spec import kwdict, Struct, Integer, Bounded, Raw, pformat
 from tls_common import *
 from tls13_spec import (
     Handshake,
@@ -20,6 +19,12 @@ from tls13_spec import (
     CipherSuite,
     PskKeyExchangeMode,
     Ticket,
+    TicketInfoStruct,
+    ClientExtension,
+    PreSharedKeyClientExtension,
+    ClientHelloHandshake,
+    PskIdentity,
+    PskBinders,
 )
 from tls_crypto import (
     get_hash_alg,
@@ -32,56 +37,34 @@ from tls_crypto import (
 
 @dataclass(frozen=True)
 class TicketInfo(TicketInfoStruct):
-    @property
-    def secret(self) -> bytes:
-        return self.secret
-
-    @property
-    def csuite(self) -> CipherSuite:
-        return self.csuite
-
-    @property
-    def modes(self) -> set[PskKeyExchangeMode]:
-        return set(self.modes)
-
-    def add_psk_ext(self, chello: Handshake, send_time: float|None = None) -> Handshake:
-        if chello.typ != HandshakeType.CLIENT_HELLO:
-            raise ValueError(f"need a client hello extension, not {chello.typ}")
-
-        extensions = list(chello.data.extensions)
+    def add_psk_ext(self, chello: ClientHelloHandshake, send_time: float|None = None) -> ClientHelloHandshake:
+        """Returns a new ClientHello Hansshake object with the PSK extension filled in."""
+        extensions: list[ClientExtension] = list(chello.data.extensions.uncreate())
         if any(ext.typ == ExtensionType.PRE_SHARED_KEY for ext in extensions):
             raise ValueError(f"client hello should not contain PSK extension yet")
 
+        # compute values for dummy psk extension
         if send_time is None:
             send_time = time.time()
-        oage = (round((send_time - self._creation) * 1000) + self._mask) % 2**32
+        oage = (round((send_time - self.creation) * 1000) + self.mask) % 2**32
         dummy_binder = b'\xdd' * get_hash_alg(self.csuite).digest_size
 
         # construct extension with dummy binder
-        binder_list = [dummy_binder]
-        #TODO HERE WORKING
-        psk_ext = kwdict(
-            typ  = ExtensionType.PRE_SHARED_KEY,
-            data = kwdict(
-                identities = [kwdict(
-                    identity              = self._id,
-                    obfuscated_ticket_age = oage,
-                )],
-                binders    = binder_list,
-            ),
+        dummy_psk_ext = PreSharedKeyClientExtension.create(
+            identities = [(self.ticket_id, oage)],
+            binders = [dummy_binder],
         )
 
         # add dummy extension to chello
-        assert all(ext.typ != ExtensionType.PRE_SHARED_KEY for ext in extensions)
-        extensions.append(psk_ext)
-        body = chello.body._asdict() | {'extensions': extensions}
-        new_chello = chello._asdict() | {'body': body}
+        dummy_chello = chello.replace(extensions = extensions + [dummy_psk_ext.parent()])
 
-        # insert actual binder and return the (new) client hello object
-        actual_binder = self.get_binder_key(Handshake.prepack(new_chello))
-        binder_list[0] = actual_binder
-        logger.info(f'inserting psk with id {self._id[:12]}... and  binder {actual_binder} into client hello')
-        return Handshake.prepack(new_chello)
+        # compute actual binder key and psk extension
+        actual_binder = self.get_binder_key(dummy_chello)
+        actual_psk_ext = dummy_psk_ext.replace(binders = [actual_binder])
+        actual_chello = chello.replace(extensions = extensions + [actual_psk_ext.parent()])
+
+        logger.info(f'inserting psk with id {self.ticket_id[:12].hex()}... and  binder {actual_binder.hex()} into client hello')
+        return actual_chello
 
     def get_binder_key(self, chello, prefix=b''):
         """Computes the binder key for this ticket within the given (unpacked) client hello.
@@ -95,7 +78,7 @@ class TicketInfo(TicketInfoStruct):
                 (lambda ext: ext.typ == ExtensionType.PRE_SHARED_KEY),
                 chello.body.extensions))
             index = next(i for i,ident in enumerate(psk_ext.data.identities)
-                         if ident.identity == self._id)
+                         if ident.identity == self.ticket_id)
         except StopIteration:
             raise TlsError("this ticket id not found in given client hello") from None
 

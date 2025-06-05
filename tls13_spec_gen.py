@@ -225,6 +225,7 @@ specs: dict[str, GenSpec] = kwdict(
         kdf_id  = 'HpkeKdfId',
         aead_id = 'HpkeAeadId',
     ),
+    PskBinders = Wrap(Bounded(16, Sequence(Bounded(8, Raw)))),
 
     ClientExtension = Select('ExtensionType', 16, Raw)(
         SERVER_NAME =
@@ -250,8 +251,7 @@ specs: dict[str, GenSpec] = kwdict(
         PRE_SHARED_KEY =
             Struct(
                 identities = Bounded(16, Sequence('PskIdentity')),
-                binders    = Bounded(16, Sequence(Bounded(8, Raw))),
-
+                binders    = 'PskBinders',
             ),
         ENCRYPTED_CLIENT_HELLO =
             Select('ECHClientHelloType')(

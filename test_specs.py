@@ -5,6 +5,7 @@ from io import BytesIO
 import spec
 from spec import Spec, FullSpec, Json
 from tls13_spec import *
+import util, tls_common, tls_crypto
 
 
 def check[T](a: T, b: T) -> None:
@@ -59,7 +60,7 @@ def positive_test_cases() -> Iterable[tuple[Spec, Json, str]]:
     yield Shorts([Uint16(20), Uint16(25)]), [20,25], '00140019'
     yield ShortShorts([Uint16(3),Uint16(4),Uint16(5)]), [3,4,5], '06000300040005'
     #yield B16S8((Uint8(10), Uint8(20))), [10,20], '00020a14'
-    yield (BrassInstrument(data=BrassInstrumentData(valves=Uint8(5), weight=Uint16(40))),
+    yield (BrassInstrument.create(valves=5, weight=40).parent(),
            {'typ': 'Brass', 'data': {'valves': 5, 'weight': 40},},
            '01050028')
 #    test_spec(Uint8, 33, 33, '21')

@@ -546,15 +546,9 @@ def get_kem_alg(kem_id: HpkeKemId) -> KeyEncaps:
 DEFAULT_KEM: HpkeKemId = HpkeKemId.DHKEM_X25519_HKDF_SHA256
 
 
-DEFAULT_HPKE_CSUITES: tuple[HpkeSymmetricCipherSuite,...] = (
-    HpkeSymmetricCipherSuite(
-        kdf_id  = HpkeKdfId.HKDF_SHA256,
-        aead_id = HpkeAeadId.AES_256_GCM,
-    ),
-    HpkeSymmetricCipherSuite(
-        kdf_id  = HpkeKdfId.HKDF_SHA256,
-        aead_id = HpkeAeadId.CHACHA20_POLY1305,
-    ),
+DEFAULT_HPKE_CSUITES: tuple[tuple[HpkeKdfId,HpkeAeadId],...] = (
+    (HpkeKdfId.HKDF_SHA256, HpkeAeadId.AES_256_GCM),
+    (HpkeKdfId.HKDF_SHA256, HpkeAeadId.CHACHA20_POLY1305),
 )
 
 
@@ -668,7 +662,7 @@ def gen_ech_config(
     config_id: int,
     maximum_name_length: int,
     kem_id: HpkeKemId,
-    cipher_suites: Iterable[HpkeSymmetricCipherSuite],
+    cipher_suites: Iterable[tuple[HpkeKdfId,HpkeAeadId]],
     rgen: Random,
 ) -> EchSecrets:
     """Generates an ECHConfig struct and corresponding private key."""
@@ -686,7 +680,7 @@ def gen_ech_config(
             maximum_name_length = maximum_name_length,
             public_name = public_name,
             extensions = [],
-        ),
+        ).parent(),
         private_key = seckey,
     )
 
@@ -696,7 +690,7 @@ def gen_server_secrets(
     config_id: int|None = None, # default, choose randomly
     maximum_name_length: int = 128,
     kem_id: HpkeKemId = DEFAULT_KEM,
-    cipher_suites: Iterable[HpkeSymmetricCipherSuite] = DEFAULT_HPKE_CSUITES,
+    cipher_suites: Iterable[tuple[HpkeKdfId,HpkeAeadId]] = DEFAULT_HPKE_CSUITES,
     rgen: Random|None = None, # default, SystemRandom
 ) -> ServerSecrets:
     """Generates a fresh certificate and ECH config."""
@@ -706,6 +700,6 @@ def gen_server_secrets(
         config_id = rgen.randrange(2**8)
 
     return ServerSecrets.create(
-        cert = gen_cert(name, sig_alg, rgen),
-        eches = [gen_ech_config(name, config_id, maximum_name_length, kem_id, cipher_suites, rgen)],
+        cert = gen_cert(name, sig_alg, rgen).uncreate(),
+        eches = [gen_ech_config(name, config_id, maximum_name_length, kem_id, cipher_suites, rgen).uncreate()],
     )

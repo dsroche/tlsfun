@@ -1,7 +1,8 @@
 """Various small utility or helper stuff not TLS specific."""
 
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Hashable
 from typing import Any
+from dataclasses import dataclass, field
 import functools
 import base64
 
@@ -23,6 +24,57 @@ class SetOnce[T]:
             return self._values[id(obj)]
         except KeyError:
             raise ValueError(f"{self._name} is not yet set on {obj}") from None
+
+@dataclass
+class OneToOne[K1: Hashable, K2: Hashable]:
+    """A one-to-one mapping, i.e. two-way dictionary."""
+    _forward: dict[K1,K2] = field(default_factory=dict)
+    _reverse: dict[K2,K1] = field(default_factory=dict)
+
+    def add(self, key1: K1, key2: K2) -> None:
+        try:
+            cur_k2 = self._forward[key1]
+        except KeyError:
+            pass
+        else:
+            if key2 == cur_k2:
+                return
+            raise ValueError(f"can't insert ({key1},{key2}) because ({key1},{cur_k2}) is already there")
+        try:
+            cur_k1 = self._reverse[key2]
+        except KeyError:
+            pass
+        else:
+            raise ValueError(f"can't insert ({key1},{key2}) because ({cur_k1},{key2}) is already there")
+        self._forward[key1] = key2
+        self._reverse[key2] = key1
+
+    def contains1(self, key: K1) -> bool:
+        return key in self._forward
+
+    def contains2(self, key: K2) -> bool:
+        return key in self._reverse
+
+    def get1(self, key: K1, default: K2|None = None) -> K2:
+        got = self._forward.get(key, default)
+        if got is None:
+            raise KeyError(str(key))
+        return got
+
+    def get2(self, key: K2, default: K1|None = None) -> K1:
+        got = self._reverse.get(key, default)
+        if got is None:
+            raise KeyError(str(key))
+        return got
+
+    def __getitem__(self, key: K1) -> K2:
+        return self.get1(key)
+
+    def __setitem__(self, key1: K1, key2: K2) -> None:
+        self.add(key1, key2)
+
+    def __contains__(self, key: K1) -> bool:
+        return self.contains1(key)
 
 def b64enc(raw_bytes: bytes) -> str:
     return base64.b64encode(raw_bytes).decode('ascii')

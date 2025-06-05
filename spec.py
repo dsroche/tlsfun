@@ -116,6 +116,9 @@ class Empty(_Fixed):
     def create(cls) -> Self:
         return cls()
 
+    def uncreate(self) -> tuple[()]:
+        return ()
+
     @override
     def jsonify(self) -> Json:
         return None
@@ -162,6 +165,9 @@ class _Integral(_Fixed, int):
     def create(cls, value: int) -> Self:
         return cls(value)
 
+    def uncreate(self) -> int:
+        return self
+
     def jsonify(self) -> Json:
         return self
 
@@ -190,6 +196,9 @@ class String(Spec, str):
     @classmethod
     def create(cls, value: str) -> Self:
         return cls(value)
+
+    def uncreate(self) -> str:
+        return self
 
     @override
     def jsonify(self) -> Json:
@@ -227,6 +236,9 @@ class Raw(Spec, bytes):
     @classmethod
     def create(cls, value: bytes) -> Self:
         return cls(value)
+
+    def uncreate(self) -> bytes:
+        return self
 
     def jsonify(self) -> Json:
         return self.hex()
@@ -303,7 +315,7 @@ class _StructBase(FullSpec):
             if isinstance(obj, typ):
                 accum.append(obj)
             else:
-                raise ValueError
+                raise ValueError(f'expected type {typ} for {name} field in {type(self).__name__}, got {obj}')
         super().__setattr__('_member_values', tuple(accum))
 
     def jsonify(self) -> Json:
