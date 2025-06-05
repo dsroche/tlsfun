@@ -127,6 +127,15 @@ class _ItemCreation:
         else:
             return f'{varname}.uncreate()'
 
+    def gen_replace(self, dest: TextIO) -> None:
+        if self.single or not self.pairs:
+            return # no replace method needed unless multiple parts
+        dest.write(indent(dedent(f"""
+            def replace(self, {', '.join(f'{name}: {tname}|None=None' for name,tname in self.pairs)}) -> Self:
+                {', '.join(f'orig_{name}' for name,_ in self.pairs)} = self.uncreate()
+                return self.create({', '.join(f'(orig_{name} if {name} is None else {name})' for name,_ in self.pairs)})
+            """), '    '))
+
 def get_stub(typ: Nested) -> str:
     match typ:
         case GenSpec():
@@ -207,6 +216,7 @@ class Wrap(GenSpec):
                 def uncreate(self) -> {creat.item}:
                     return {creat.to_pairs('self.data')}
             """))
+        creat.gen_replace(dest)
 
     def prereqs(self) -> Iterable[Nested]:
         yield self.inner_type
@@ -671,6 +681,7 @@ class _SelecteeGen(_SelecteeDefault):
                     return {creat.to_pairs('self.data')}
             """))
         self._gen_parent(dest, names)
+        creat.gen_replace(dest)
 
 @dataclass(frozen=True)
 class _SelectActual(GenSpec):
