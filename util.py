@@ -33,25 +33,6 @@ def pp(obj:Any, byteslen:int=32, **kwargs: Any) -> None:
 def pformat(obj:Any, byteslen:int=32, **kwargs: Any) -> str:
     return pprint.pformat(_pretty_prep(obj, byteslen), sort_dicts=False, **kwargs)
 
-class SetOnce[T]:
-    """Descriptor that allows setting but not getting an attribute value."""
-    def __init__(self) -> None:
-        self._values: dict[int, T] = {}
-
-    def __set_name__(self, owner: Any, name: str) -> None:
-        self._name = name
-
-    def __set__(self, obj: Any, value: T) -> None:
-        if id(obj) in self._values:
-            raise ValueError(f"{self._name} is already set on {obj}")
-        self._values[id(obj)] = value
-
-    def __get__(self, obj: Any, objtype:Any = None) -> T:
-        try:
-            return self._values[id(obj)]
-        except KeyError:
-            raise ValueError(f"{self._name} is not yet set on {obj}") from None
-
 @dataclass
 class OneToOne[K1: Hashable, K2: Hashable]:
     """A one-to-one mapping, i.e. two-way dictionary."""

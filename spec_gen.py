@@ -712,7 +712,7 @@ class _SelectActual(GenSpec):
     def generate(self, dest: TextIO, names: OneToOne[GenSpec,str]) -> None:
         sname = get_name(self.select_type, names)
         dname = 'None' if self.default_type is None else names[self.default_type]
-        tname = f'{names[self]}Variants'
+        tname = f'{names[self]}Variant'
         sel_types: list[_SelecteeDefault] = [s for _,s in self.selectees]
         if self.default_type is not None:
             sel_types.append(self.default_type)

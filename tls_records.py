@@ -1,6 +1,9 @@
 """Record-level transmission logic for TLS 1.3."""
 
 from collections import namedtuple
+from dataclasses import dataclass, field
+from abc import ABC, abstractmethod
+from typing import override
 
 from tls_common import *
 from util import SetOnce
@@ -12,44 +15,97 @@ from tls13_spec import (
     Version,
     InnerPlaintext,
 )
-from tls_crypto import StreamCipher
+from tls_crypto import AeadCipher, Hasher, StreamCipher
 
+class PayloadProcessor(ABC):
+    @abstractmethod
+    def process_hs_payload(payload: bytes) -> None: ...
+
+@dataclass
+class DataBuffer:
+    _buf: bytearray = field(default_factory=bytearray)
+
+    def __bool__(self) -> bool:
+        return bool(self._buf)
+
+    def add(self, payload: bytes) -> None:
+        self._buf.extend(payload)
+
+    def get(self, maxsize: int) -> bytes:
+        chunk = self._buf[:maxsize]
+        del self._buf[:maxsize]
+        return chunk
+
+@dataclass
+class HandshakeBuffer(DataBuffer):
+    owner: PayloadProcessor|None = None
+
+    @override
+    def add(self, payload: bytes) -> None:
+        super().add(payload)
+
+        # try to break off any complete handshake messages
+        while len(self._buf) >= 4:
+            size = 4 + int.from_bytes(self._buf[1:4])
+            if len(self._buf) < size:
+                break
+            if self.owner is not None:
+                self.owner.process_hs_payload(self.get(size))
+
+
+@dataclass
 class RecordReader:
-    hs_buffer = SetOnce()
+    _file: BinaryIO
+    _transcript: HandshakeTranscript
+    _app_data_buffer: DataBuffer
+    _unwrapper: StreamCipher|None = None
+    _key_count: int = -1
+    _hs_buffer: HandshakeBuffer|None = None
 
-    def __init__(self, file, transcript, app_data_buffer):
-        self._file = file
-        self._transcript = transcript
-        self._app_data_buffer = app_data_buffer
-        self._unwrapper = None
-        self._key_count = -1
+    @property
+    def hs_buffer(self) -> HandshakeBuffer:
+        assert self._hs_buffer is not None
+        return self._hs_buffer
 
-    def rekey(self, cipher, hash_alg, secret):
+    @hs_buffer.setter
+    def hs_buffer(self, val: HandshakeBuffer) -> None:
+        assert self._hs_buffer is None
+        self._hs_buffer = val
+
+    def rekey(self, cipher: AeadCipher, hash_alg: Hasher, secret: bytes):
         logger.info(f"rekeying record reader to key {secret.hex()[:16]}...")
         self._unwrapper = StreamCipher(cipher, hash_alg, secret)
         self._key_count += 1
 
-    def get_next_record(self):
+    def get_next_record(self) -> Record:
         logger.info('trying to fetch a record from the incoming stream')
         try:
             record = Record.unpack_from(self._file)
         except (UnpackError, EOFError) as e:
             raise TlsError("error reading or unpacking record from server") from e
 
-        (typ,vers), payload = record
-        logger.info(f'Fetched a length-{len(payload)} record of type {typ}')
+        logger.info(f'Fetched a record of type {record.typ}')
         wrapped = False
         padding = 0
 
+        match record.variant:
+            case ChangeCipherSpecRecord() as ccsrec:
+                pass #TODO
+            case HandshakeRecord() as hsrec:
+                pass #TODO
+            case ApplicationDataRecord() as adrec:
+                if self._unwrapper is None:
+                    raise TlsError("got APPLICATION_DATA before setting encryption keys")
+                wrapped = True
+                header = RecordHeader.create(adrec.typ, adrec.version, len(adrec.payload))
+                ptext = self._unwrapper.decrypt(adrec.payload, header.pack())
+                typ, payload, padding = InnerPlaintext.unpack(ptext)
+                logger.info(f'Decrypted record to length-{len(payload)} of type {typ} with padding {padding}')
+                kc = self._key_count
+            case AlertRecord() as alrec:
+                pass #TODO
+
         if typ == ContentType.APPLICATION_DATA:
-            if self._unwrapper is None:
-                raise TlsError("got APPLICATION_DATA before setting encryption keys")
-            wrapped = True
-            header = RecordHeader.pack(typ, vers, len(payload))
-            ptext = self._unwrapper.decrypt(payload, header)
-            typ, payload, padding = InnerPlaintext.unpack(ptext)
-            logger.info(f'Decrypted record to length-{len(payload)} of type {typ} with padding {padding}')
-            kc = self._key_count
         else:
             if self._unwrapper is not None and typ != ContentType.CHANGE_CIPHER_SPEC:
                 raise TlsError(f"got unwrapped {typ} record but decryption key has been established")
@@ -127,38 +183,6 @@ class RecordWriter:
 
         force_write(self._file, raw)
         logger.info(f'sent a size-{len(payload)} payload {"" if wrapped else "un"}wrapped in a size-{len(raw)} record')
-
-
-class DataBuffer:
-    def __init__(self):
-        self._buf = bytearray()
-
-    def __bool__(self):
-        return bool(self._buf)
-
-    def add(self, payload):
-        self._buf.extend(payload)
-
-    def get(self, maxsize):
-        chunk = self._buf[:maxsize]
-        del self._buf[:maxsize]
-        return chunk
-
-
-class HandshakeBuffer(DataBuffer):
-    def __init__(self, owner):
-        super().__init__()
-        self._owner = owner # e.g. ClientHandshake, will receive hs payloads
-
-    def add(self, payload):
-        super().add(payload)
-
-        # try to break off any complete handshake messages
-        while len(self._buf) >= 4:
-            size = 4 + int.from_bytes(self._buf[1:4])
-            if len(self._buf) < size:
-                break
-            self._owner.process_hs_payload(self.get(size))
 
 
 RecordEntry = namedtuple(
