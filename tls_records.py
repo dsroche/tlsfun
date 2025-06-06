@@ -22,8 +22,10 @@ from tls13_spec import (
 from tls_crypto import AeadCipher, Hasher, StreamCipher
 from tls_keycalc import KeyCalc, KeyCalcMissing
 
+HOST_NAME_TYPE = 0 # for SNI extension
 CCS_PAYLOAD = b'\x01'
-DEFAULT_VERSION = Version.TLS_1_2
+DEFAULT_LEGACY_VERSION = Version.TLS_1_2
+DEFAULT_LEGACY_COMPRESSION = [0]
 
 class PayloadProcessor(ABC):
     @abstractmethod
@@ -216,8 +218,8 @@ class RecordWriter:
 
     def send(self, record: Record, padding: int = 0) -> None:
         if self.wrapper is not None and record.typ != ContentType.CHANGE_CIPHER_SPEC:
-            if record.version != DEFAULT_VERSION:
-                raise ValueError(f"wrapped records should always have version {repr(DEFAULT_VERSION)}")
+            if record.version != DEFAULT_LEGACY_VERSION:
+                raise ValueError(f"wrapped records should always have version {repr(DEFAULT_LEGACY_VERSION)}")
             ptext = InnerPlaintext.create(
                 payload = record.payload,
                 typ     = record.typ,
@@ -225,7 +227,7 @@ class RecordWriter:
             ).pack()
             header = RecordHeader.create(
                 typ     = ContentType.APPLICATION_DATA,
-                version = DEFAULT_VERSION,
+                version = DEFAULT_LEGACY_VERSION,
                 size    = self.wrapper.cipher.ctext_size(len(ptext))
             ).pack()
             ctext = self.wrapper.encrypt(ptext, header)
@@ -292,7 +294,7 @@ class Connection:
             chunk = buf[:maxp]
             self._rwriter.send(Record.create(
                 typ = ContentType.APPLICATION_DATA,
-                version = DEFAULT_VERSION,
+                version = DEFAULT_LEGACY_VERSION,
                 payload = bytes(buf[:maxp])
             ))
             del buf[:maxp]

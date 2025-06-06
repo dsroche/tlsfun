@@ -1,4 +1,4 @@
-from typing import Self, BinaryIO, TextIO, Any, override
+from typing import Self, BinaryIO, TextIO, Any, override, ClassVar
 from collections.abc import Iterable
 from functools import cached_property
 from dataclasses import dataclass, field
@@ -37,7 +37,7 @@ class NameRank:
 
 @dataclass(frozen=True)
 class GenSpec:
-    _name_stub: NameRank = field(default_factory=NameRank, kw_only=True, hash=False, compare=False)
+    _name_stub: NameRank = field(default_factory=NameRank, init=False, hash=False)
 
     @property
     def stub(self) -> str:
@@ -62,7 +62,7 @@ class GenSpec:
     def create_from(self, names: OneToOne['GenSpec',str]) -> Iterable[tuple[str,str]] | None:
         return None
 
-@dataclass(frozen=True)
+@dataclass
 class _ItemCreation:
     """helper class for create_from stuff when being used recursively"""
     item_type: Nested
@@ -207,7 +207,6 @@ class Wrap(GenSpec):
         dest.write(dedent(f"""\
             class {names[self]}(spec._Wrapper[{get_name(self.inner_type, names)}]):
                 _DATA_TYPE = {dt}
-                _CREATE_FROM = {creat.pairstring}
 
                 @classmethod
                 def create(cls{creat.args}) -> Self:
@@ -529,7 +528,6 @@ class Sequence(GenSpec):
         items_t = f'Iterable[{creat.item}]'
         dest.write(dedent(f"""\
             class {names[self]}(spec._Sequence[{nn}]):
-                _CREATE_FROM = (('items', {items_t}),)
                 _ITEM_TYPE = {nn}
 
                 @classmethod
@@ -572,8 +570,6 @@ class _Struct(GenSpec):
                 _member_names: ClassVar[tuple[str,...]] = ({','.join(repr(name) for (name,_) in self.schema)},)
                 _member_types: ClassVar[tuple[type[Spec],...]] = ({','.join(tname for _,tname,_ in members)},)
             """))
-        # TODO
-                #_CREATE_FROM: ClassVar[tuple[tuple[str,type[Any]],...]] = ({''.join(f'({repr(name)},{creat.item}),' for name,_,creat in members)})
 
         for name,tname,_ in members:
             dest.write(f'    {name}: {tname}\n')
@@ -608,13 +604,20 @@ def Struct(**kwargs: Nested) -> _Struct:
     return _Struct(tuple(kwargs.items()))
 
 @dataclass(frozen=True)
-class _SelecteeDefault(GenSpec):
+class _SelecteeGeneric(GenSpec):
+    count: int # used to ensure uniqueness
     select_type: Nested
     data_type: Nested
     parent: '_SelectActual|None' = field(init=False,hash=False,compare=False,default=None)
 
     def __post_init__(self) -> None:
-        self.suggest(f'Default{get_stub(self.select_type)}Selection', 30)
+        self.suggest(f'Generic{get_stub(self.select_type)}Selection', 30)
+
+    @override
+    def create_from(self, names: OneToOne[GenSpec,str]) -> Iterable[tuple[str,str]]:
+        screat = _ItemCreation(self.select_type, names)
+        dcreat = _ItemCreation(self.data_type, names)
+        return (('typ', screat.item), ('data', dcreat.item))
 
     def set_parent(self, parent: '_SelectActual') -> None:
         assert self.parent is None, "shouldn't set parent twice"
@@ -632,10 +635,19 @@ class _SelecteeDefault(GenSpec):
     def generate(self, dest: TextIO, names: OneToOne[GenSpec,str]) -> None:
         sname = get_name(self.select_type, names)
         dname = get_name(self.data_type, names)
+        screat = _ItemCreation(self.select_type, names)
+        dcreat = _ItemCreation(self.data_type, names)
         dest.write(dedent(f"""\
             class {names[self]}(spec._Selectee[{sname}, {dname}]):
                 _SELECT_TYPE = {sname}
                 _DATA_TYPE = {dname}
+
+                @classmethod
+                def create(cls, typ: {screat.item}, data: {dcreat.item}) -> Self:
+                    return cls({screat.create_line(sname,'typ')}, {dcreat.create_line(dname,'data')})
+
+                def uncreate(self) -> tuple[{screat.item}, {dcreat.item}]:
+                    return ({screat.to_pairs('self.typ')}, {dcreat.to_pairs('self.data')})
             """))
         self._gen_parent(dest, names)
 
@@ -645,7 +657,7 @@ class _SelecteeDefault(GenSpec):
         yield self.data_type
 
 @dataclass(frozen=True)
-class _SelecteeGen(_SelecteeDefault):
+class _SelecteeSpecific(_SelecteeGeneric):
     selection: str
 
     @override
@@ -676,7 +688,6 @@ class _SelecteeGen(_SelecteeDefault):
                 _SELECT_TYPE = {sname}
                 _DATA_TYPE = {dname}
                 _SELECTOR = {sname}.{self.selection}
-                _CREATE_FROM = {creat.pairstring}
 
                 @classmethod
                 def create(cls{creat.args}) -> Self:
@@ -691,22 +702,32 @@ class _SelecteeGen(_SelecteeDefault):
 @dataclass(frozen=True)
 class _SelectActual(GenSpec):
     select_type: Nested
-    default_type: _SelecteeDefault|None
-    selectees: tuple[tuple[str, _SelecteeGen], ...]
+    generic_type: _SelecteeGeneric|None
+    selectees: tuple[tuple[str, _SelecteeSpecific], ...]
 
     def __post_init__(self) -> None:
         sname = get_stub(self.select_type)
         self.update_stub(exact_rstrip(sname, 'Type', 'Obj'), 60)
-        if self.default_type is not None:
-            self.default_type.set_parent(self)
+        if self.generic_type is not None:
+            self.generic_type.set_parent(self)
+            self.generic_type.suggest('Generic' + self.stub, 40)
         for name, sel in self.selectees:
             sel.set_parent(self)
             sel.suggest(camel_case(name) + self.stub, 40)
+
+    def _tname(self, names: OneToOne[GenSpec,str]) -> str:
+        return f'{names[self]}Variant'
+
+    @override
+    def create_from(self, names: OneToOne[GenSpec,str]) -> Iterable[tuple[str,str]]:
+        return (('variant', self._tname(names)),)
 
     @override
     def suggest(self, name: str, rank: float) -> bool:
         if self.update_stub(name, rank):
             stub = exact_rstrip(name, 'Obj')
+            if self.generic_type is not None:
+                self.generic_type.suggest('Generic' + stub, 40)
             for sname, sgen in self.selectees:
                 sgen.suggest(camel_case(sname) + stub, 40)
             return True
@@ -716,17 +737,17 @@ class _SelectActual(GenSpec):
     @override
     def generate(self, dest: TextIO, names: OneToOne[GenSpec,str]) -> None:
         sname = get_name(self.select_type, names)
-        dname = 'None' if self.default_type is None else names[self.default_type]
-        tname = f'{names[self]}Variant'
-        sel_types: list[_SelecteeDefault] = [s for _,s in self.selectees]
-        if self.default_type is not None:
-            sel_types.append(self.default_type)
+        gname = 'None' if self.generic_type is None else names[self.generic_type]
+        tname = self._tname(names)
+        sel_types: list[_SelecteeGeneric] = [s for _,s in self.selectees]
+        if self.generic_type is not None:
+            sel_types.append(self.generic_type)
         dest.write(dedent(f"""
-            type {tname} = {' | '.join(names[s] for s in sel_types)}
+            {tname} = {' | '.join(names[s] for s in sel_types)}
 
             class {names[self]}(spec._Select[{sname}]):
                 _SELECT_TYPE = {sname}
-                _DEFAULT_TYPE = {dname}
+                _GENERIC_TYPE = {gname}
                 _SELECTEES = {{{', '.join(f'{sname}.{key}:{names[s]}' for key,s in self.selectees)}}}
 
                 def __init__(self, value: {tname}) -> None:
@@ -736,13 +757,20 @@ class _SelectActual(GenSpec):
                 @property
                 def variant(self) -> {tname}:
                     return self._value
+
+                @classmethod
+                def create(cls, variant: {tname}) -> Self:
+                    return cls(variant)
+
+                def uncreate(self) -> {tname}:
+                    return self.variant
             """))
 
     @override
     def prereqs(self) -> Iterable[Nested]:
         yield self.select_type
-        if self.default_type is not None:
-            yield self.default_type
+        if self.generic_type is not None:
+            yield self.generic_type
         for _,sel in self.selectees:
             yield sel
 
@@ -750,7 +778,8 @@ class _SelectActual(GenSpec):
 class Select:
     select_type: Nested
     bit_length: int|None = None
-    default_type: Nested|None = None
+    generic_type: Nested|None = None
+    counter: ClassVar[int] = 0
 
     def _maybe_bounded(self, typ: Nested) -> Nested:
         if self.bit_length is None:
@@ -759,12 +788,14 @@ class Select:
             return Bounded(self.bit_length, typ)
 
     def __call__(self, **kwargs: Nested) -> _SelectActual:
+        type(self).counter += 1
+        count = type(self).counter
         return _SelectActual(
             self.select_type,
-            (None if self.default_type is None
-             else _SelecteeDefault(self.select_type, self._maybe_bounded(self.default_type))),
+            (None if self.generic_type is None
+             else _SelecteeGeneric(count, self.select_type, self._maybe_bounded(self.generic_type))),
             tuple((enum_key,
-                   _SelecteeGen(self.select_type, self._maybe_bounded(typ), enum_key))
+                   _SelecteeSpecific(count, self.select_type, self._maybe_bounded(typ), enum_key))
                   for (enum_key, typ) in kwargs.items()),
         )
 

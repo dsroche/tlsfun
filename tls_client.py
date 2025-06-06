@@ -5,7 +5,7 @@ from collections import namedtuple
 from secrets import SystemRandom
 from random import Random
 
-from spec import kwdict
+from util import same_signature
 from tls_common import *
 from tls13_spec import (
     Handshake,
@@ -20,6 +20,21 @@ from tls13_spec import (
     ECHClientHelloType,
     HpkeKdfId,
     HpkeAeadId,
+    CipherSuite,
+    NamedGroup,
+    SignatureScheme,
+    ClientHelloHandshake,
+    ClientSecrets,
+    ClientExtensionVariant,
+    ServerNameClientExtension,
+    GenericClientExtension,
+    SupportedGroupsClientExtension,
+    SignatureAlgorithmsClientExtension,
+    SupportedVersionsClientExtension,
+    PskKeyExchangeModesClientExtension,
+    KeyShareClientExtension,
+    OuterECHClientHello,
+    EncryptedClientHelloClientExtension,
 )
 from tls_crypto import (
     get_kex_alg,
@@ -27,9 +42,12 @@ from tls_crypto import (
     get_hash_alg,
     get_cipher_alg,
     extract_x509_pubkey,
+    KexAlg,
     DEFAULT_KEX_GROUPS,
+    DEFAULT_KEX_MODES,
     DEFAULT_SIGNATURE_SCHEMES,
     DEFAULT_CIPHER_SUITES,
+    DEFAULT_HPKE_CSUITES,
 )
 from tls_records import (
     RecordTranscript,
@@ -38,15 +56,133 @@ from tls_records import (
     RecordWriter,
     HandshakeBuffer,
     Connection,
+    HOST_NAME_TYPE,
+    DEFAULT_LEGACY_VERSION,
+    DEFAULT_LEGACY_COMPRESSION,
 )
-from tls_keycalc import KeyCalc, HandshakeTranscript
+from tls_keycalc import KeyCalc, HandshakeTranscript, TicketInfo
 
 
-ClientSecrets = namedtuple(
-        'ClientSecrets', 'psk kex_sks', defaults=[None, ()])
+def build_client_hello(
+        sni: str|None = None, # server name indication
+        ciphers: Iterable[CipherSuite]|None = None, # default, replace with DEFAULT_CIPHER_SUITES or ticket.csuite
+        kex_groups: Iterable[NamedGroup] = DEFAULT_KEX_GROUPS,
+        kex_share_groups: Iterable[NamedGroup]|None = None, # defaults to the first one in kex_groups
+        sig_algs: Iterable[SignatureScheme] = DEFAULT_SIGNATURE_SCHEMES,
+        ticket: TicketInfo|None = None, # reconnect ticket to use as PSK for reconnect
+        psk_modes: Iterable[PskKeyExchangeMode] = DEFAULT_KEX_MODES,
+        send_time: float|None = None, # default to current time
+        rseed: int|bytes|None = None, # optional seed for repeatability; NOT secure
+        grease_ech: bool = True, # send a GREASE ECH extension (to gather server parameters)
+) -> tuple[ClientHelloHandshake, ClientSecrets]:
+    """Returns (unpacked) ClientHello handshake struct and ClientSecrets tuple."""
+
+    rgen = SystemRandom() if rseed is None else Random(rseed)
+
+    if ciphers is None:
+        if ticket is None:
+            ciphers = DEFAULT_CIPHER_SUITES
+        else:
+            ciphers = (ticket.csuite,)
+    else:
+        ciphers = tuple(ciphers)
+
+    if ticket is not None and ticket.csuite not in ciphers:
+        raise ValueError("incompatible cipher suites for this ticket")
+
+    kex_groups = tuple(kex_groups)
+
+    # generate key exchange secrets and shares
+    kex_sks: list[bytes] = []
+    shares: list[tuple[NamedGroup, bytes]] = []
+    if kex_share_groups is None:
+        kex_share_groups = kex_groups[:1]
+    for group in kex_share_groups:
+        kex = get_kex_alg(group)
+        secret = kex.gen_private(rgen)
+        share = kex.get_public(secret)
+        kex_sks.append(secret)
+        shares.append((group, share))
+
+    if not shares and ticket is None:
+        raise ValueError("need either DHE or PSK (or both), but got neither")
+
+    # fill in client hello extension entries
+    extensions: list[ClientExtensionVariant] = []
+    if sni is not None:
+        extensions.append(ServerNameClientExtension.create(
+            [(HOST_NAME_TYPE, sni)]
+        ))
+
+    # indicates all point formats are accepted (legacy)
+    extensions.append(GenericClientExtension.create(
+        typ = ExtensionType.LEGACY_EC_POINT_FORMATS,
+        data = bytes.fromhex('03000102'),
+    ))
+
+    # which groups supported for key exchange
+    extensions.append(SupportedGroupsClientExtension.create(kex_groups))
+
+    # more backwards compatibility empty info,
+    # probably not necessary but who knows
+    extensions.append(GenericClientExtension.create(
+        typ = ExtensionType.LEGACY_SESSION_TICKET,
+        data = b'',
+    ))
+    extensions.append(GenericClientExtension.create(
+        typ = ExtensionType.LEGACY_ENCRYPT_THEN_MAC,
+        data = b'',
+    ))
+    extensions.append(GenericClientExtension.create(
+        typ = ExtensionType.LEGACY_EXTENDED_MASTER_SECRET,
+        data = b'',
+    ))
+
+    # which signature algorithms allowed for CertificateVerify message
+    extensions.append(SignatureAlgorithmsClientExtension.create(sig_algs))
+
+    # indicate only TLS 1.3 is supported
+    extensions.append(SupportedVersionsClientExtension.create([Version.TLS_1_3]))
+
+    # indicate whether DHE must still be done on resumption with a ticket
+    extensions.append(PskKeyExchangeModesClientExtension.create(psk_modes))
+
+    if shares:
+        # send the DHE public key
+        extensions.append(KeyShareClientExtension.create(shares))
+
+    # add GREASE ECH if requested
+    if grease_ech:
+        extensions.append(EncryptedClientHelloClientExtension.create(
+            variant = OuterECHClientHello.create(
+                cipher_suite = DEFAULT_HPKE_CSUITES[0],
+                config_id = rgen.randrange(2**8),
+                enc = rgen.randbytes(32),
+                payload = rgen.randbytes(239),
+            ),
+        ))
+
+    # calculate client hello handshake message
+    ch = ClientHelloHandshake.create(
+        legacy_version     = DEFAULT_LEGACY_VERSION,
+        client_random      = rgen.randbytes(32),
+        session_id         = rgen.randbytes(32),
+        ciphers            = ciphers,
+        legacy_compression = DEFAULT_LEGACY_COMPRESSION,
+        extensions         = extensions,
+    )
+
+    # add PRE_SHARED_KEY extension if using a ticket
+    psk = b''
+    if ticket is not None:
+        ch = ticket.add_psk_ext(ch, send_time)
+        psk = ticket.secret
+
+    return ch, ClientSecrets.create(kex_sks=kex_sks, psk=psk)
 
 
 class Client(Connection):
+    @same_signature(build_client_hello)
     @classmethod
     def build(cls, *args, **kwargs):
         return cls(*build_client_hello(*args, **kwargs))
@@ -319,114 +455,3 @@ class _ClientHandshake:
     def _process_ticket(self, body):
         self.tickets.append(self._key_calc.ticket_info(body, modes=self._psk_modes))
         logger.info("got and stored a reconnect ticket")
-
-
-def build_client_hello(
-        sni = None, # server name indication
-        ciphers = None, # default, replace with DEFAULT_CIPHER_SUITES or ticket.csuite
-        kex_groups = DEFAULT_KEX_GROUPS,
-        kex_share_groups = None, # defaults to the first one in kex_groups
-        sig_algs = DEFAULT_SIGNATURE_SCHEMES,
-        ticket = None, # reconnect ticket to use as PSK for reconnect
-        psk_modes = (PskKeyExchangeMode.PSK_DHE_KE,),
-        send_time = None, # default to current time
-        rseed = None, # optional seed for repeatability; NOT secure
-        grease_ech = True, # send a GREASE ECH extension (to gather server parameters)
-        ):
-    """Returns (unpacked) ClientHello handshake struct and ClientSecrets tuple."""
-
-    rgen = SystemRandom() if rseed is None else Random(rseed)
-
-    if ciphers is None:
-        if ticket is None:
-            ciphers = DEFAULT_CIPHER_SUITES
-        else:
-            ciphers = (ticket.csuite,)
-    elif ticket is not None:
-        if ticket.csuite not in ciphers:
-            raise ValueError("incompatible cipher suites for this ticket")
-
-    if send_time is None:
-        send_time = time.time()
-
-    # generate key exchange secrets and shares
-    kex_sks = []
-    shares = []
-    if kex_share_groups is None:
-        kex_share_groups = kex_groups[:1]
-    for group in kex_share_groups:
-        kex = get_kex_alg(group)
-        secret = kex.gen_private(rgen)
-        share = kex.get_public(secret)
-        kex_sks.append(secret)
-        shares.append({'group': group, 'pubkey': share})
-
-    if not shares and ticket is None:
-        raise ValueError("need either DHE or PSK (or both), but got neither")
-
-    # fill in client hello extension entries
-    extensions = []
-    if sni is not None:
-        extensions.append((ExtensionType.SERVER_NAME,
-                           [{'host_name': sni}]))
-
-    # indicates all point formats are accepted (legacy)
-    extensions.append((ExtensionType.LEGACY_EC_POINT_FORMATS, bytes.fromhex('03000102')))
-
-    # which groups supported for key exchange
-    extensions.append((ExtensionType.SUPPORTED_GROUPS, kex_groups))
-
-    # more backwards compatibility empty info,
-    # probably not necessary but who knows
-    extensions.append((ExtensionType.LEGACY_SESSION_TICKET, b''))
-    extensions.append((ExtensionType.LEGACY_ENCRYPT_THEN_MAC, b''))
-    extensions.append((ExtensionType.LEGACY_EXTENDED_MASTER_SECRET, b''))
-
-    # which signature algorithms allowed for CertificateVerify message
-    extensions.append((ExtensionType.SIGNATURE_ALGORITHMS, sig_algs))
-
-    # indicate only TLS 1.3 is supported
-    extensions.append((ExtensionType.SUPPORTED_VERSIONS, [Version.TLS_1_3]))
-
-    # indicate whether DHE must still be done on resumption with a ticket
-    extensions.append((ExtensionType.PSK_KEY_EXCHANGE_MODES, list(psk_modes)))
-
-    if shares:
-        # send the DHE public key
-        extensions.append((ExtensionType.KEY_SHARE, shares))
-
-    # add GREASE ECH if requested
-    extensions.append(ClientExtension.prepack(
-        typ  = ExtensionType.ENCRYPTED_CLIENT_HELLO,
-        data = kwdict(
-            typ  = ECHClientHelloType.OUTER,
-            data = kwdict(
-                cipher_suite = kwdict(
-                    kdf_id = HpkeKdfId.HKDF_SHA256,
-                    aead_id = HpkeAeadId.CHACHA20_POLY1305,
-                ),
-                config_id = rgen.randrange(2**8),
-                enc = rgen.randbytes(32),
-                payload = rgen.randbytes(239),
-            ),
-        ),
-    ))
-
-    # calculate client hello handshake message
-    ch = Handshake.prepack(
-        typ  = HandshakeType.CLIENT_HELLO,
-        body = kwdict(
-            client_random = rgen.randbytes(32),
-            session_id    = rgen.randbytes(32),
-            ciphers       = ciphers,
-            extensions    = extensions,
-        ),
-    )
-
-    # add PRE_SHARED_KEY extension if using a ticket
-    psk = None
-    if ticket is not None:
-        ch = ticket.add_psk_ext(ch, send_time)
-        psk = ticket.secret
-
-    return Handshake.prepack(ch), ClientSecrets(kex_sks=kex_sks, psk=psk)

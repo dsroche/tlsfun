@@ -1,7 +1,7 @@
 """Various small utility or helper stuff not TLS specific."""
 
 from collections.abc import Callable, Iterable, Hashable
-from typing import Any
+from typing import Any, cast
 from dataclasses import dataclass, field
 import functools
 import base64
@@ -144,3 +144,9 @@ def exact_rstrip(orig: str, suffix: str, new_suffix: str = '') -> str:
 
 def camel_case(orig: str) -> str:
     return orig.replace('_',' ').title().replace(' ','')
+
+def same_signature[**A,R](original: Callable[A,R]) -> Callable[[Callable[...,Any]],Callable[A,R]]:
+    # https://stackoverflow.com/a/77954920
+    def decorate(target: Callable[...,Any]) -> Callable[A,R]:
+        return cast(Callable[A,R], target)
+    return decorate

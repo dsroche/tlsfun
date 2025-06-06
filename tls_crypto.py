@@ -53,11 +53,11 @@ from tls13_spec import (
     KeyConfig,
     HpkeSymmetricCipherSuite,
     Draft24ECHConfig,
+    PskKeyExchangeMode,
 )
 
 _PycaXPublicKey = X25519PublicKey | X448PublicKey
 _PycaXPrivateKey = X25519PrivateKey | X448PrivateKey
-
 _PycaEdPublicKey = Ed25519PublicKey | Ed448PublicKey
 _PycaSigPublicKey = _PycaEdPublicKey | EllipticCurvePublicKey | RSAPublicKey
 _PycaEdPrivateKey = Ed25519PrivateKey | Ed448PrivateKey
@@ -545,12 +545,14 @@ def get_kem_alg(kem_id: HpkeKemId) -> KeyEncaps:
 
 DEFAULT_KEM: HpkeKemId = HpkeKemId.DHKEM_X25519_HKDF_SHA256
 
-
 DEFAULT_HPKE_CSUITES: tuple[tuple[HpkeKdfId,HpkeAeadId],...] = (
     (HpkeKdfId.HKDF_SHA256, HpkeAeadId.AES_256_GCM),
     (HpkeKdfId.HKDF_SHA256, HpkeAeadId.CHACHA20_POLY1305),
 )
 
+DEFAULT_KEX_MODES: tuple[PskKeyExchangeMode,...] = (
+    PskKeyExchangeMode.PSK_DHE_KE,
+)
 
 @dataclass
 class StreamCipher:
@@ -680,7 +682,7 @@ def gen_ech_config(
             maximum_name_length = maximum_name_length,
             public_name = public_name,
             extensions = [],
-        ).parent(),
+        ),
         private_key = seckey,
     )
 

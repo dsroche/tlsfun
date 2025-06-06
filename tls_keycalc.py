@@ -31,6 +31,7 @@ from tls13_spec import (
     PskBinders,
     ServerTicketPlaintext,
     ServerTicketCiphertext,
+    ClientExtensionVariant,
 )
 from tls_crypto import (
     get_hash_alg,
@@ -39,6 +40,7 @@ from tls_crypto import (
     hkdf_expand_label,
     derive_secret,
     Hasher,
+    DEFAULT_KEX_MODES,
 )
 
 
@@ -46,7 +48,7 @@ from tls_crypto import (
 class TicketInfo(TicketInfoStruct):
     def add_psk_ext(self, chello: ClientHelloHandshake, send_time: float|None = None) -> ClientHelloHandshake:
         """Returns a new ClientHello Hansshake object with the PSK extension filled in."""
-        extensions: list[ClientExtension] = list(chello.data.extensions.uncreate())
+        extensions: list[ClientExtensionVariant] = list(chello.data.extensions.uncreate())
         if any(ext.typ == ExtensionType.PRE_SHARED_KEY for ext in extensions):
             raise ValueError(f"client hello should not contain PSK extension yet")
 
@@ -63,12 +65,12 @@ class TicketInfo(TicketInfoStruct):
         )
 
         # add dummy extension to chello
-        dummy_chello = chello.replace(extensions = extensions + [dummy_psk_ext.parent()])
+        dummy_chello = chello.replace(extensions = extensions + [dummy_psk_ext])
 
         # compute actual binder key and psk extension
         actual_binder = self.get_binder_key(dummy_chello)
         actual_psk_ext = dummy_psk_ext.replace(binders = [actual_binder])
-        actual_chello = chello.replace(extensions = extensions + [actual_psk_ext.parent()])
+        actual_chello = chello.replace(extensions = extensions + [actual_psk_ext])
 
         logger.info(f'inserting psk with id {self.ticket_id[:12].hex()}... and  binder {actual_binder.hex()} into client hello')
         return actual_chello
@@ -299,7 +301,7 @@ class KeyCalc:
             length   = self.hash_alg.digest_size,
         )
 
-    def ticket_info(self, ticket: Ticket, modes:Iterable[PskKeyExchangeMode]=(PskKeyExchangeMode.PSK_DHE_KE,), creation: int|None = None) -> TicketInfo:
+    def ticket_info(self, ticket: Ticket, modes:Iterable[PskKeyExchangeMode]=DEFAULT_KEX_MODES, creation: int|None = None) -> TicketInfo:
         # rfc8446#section-4.6.1
         return TicketInfo.create(
             ticket_id = ticket.ticket,

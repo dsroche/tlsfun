@@ -606,7 +606,7 @@ class _SpecificSelectee[S: _SpecEnum, T: Spec](_Selectee[S, T]):
 
 class _Select[S: _SpecEnum](Spec):
     _SELECT_TYPE: type[S]
-    _DEFAULT_TYPE: type[_Selectee[S,Spec]] | None
+    _GENERIC_TYPE: type[_Selectee[S,Spec]] | None
     _SELECTEES: dict[S, type[_Selectee[S,Spec]]]
 
     def __init__(self, value: _Selectee[S,Spec]) -> None:
@@ -629,10 +629,10 @@ class _Select[S: _SpecEnum](Spec):
         try:
             return cls._SELECTEES[selector]
         except KeyError:
-            if cls._DEFAULT_TYPE is None:
-                raise ValueError(f'got unexpected selector {repr(selector)} with no default')
+            if cls._GENERIC_TYPE is None:
+                raise ValueError(f'got unexpected selector {repr(selector)} with no generic')
             else:
-                return cls._DEFAULT_TYPE
+                return cls._GENERIC_TYPE
 
     @override
     @classmethod
