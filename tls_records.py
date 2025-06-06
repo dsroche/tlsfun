@@ -3,23 +3,28 @@
 from collections import namedtuple
 from dataclasses import dataclass, field
 from abc import ABC, abstractmethod
-from typing import override
+from typing import override, ClassVar, BinaryIO
 
 from tls_common import *
-from util import SetOnce
-from spec import force_write, UnpackError
+import spec
+from spec import force_write, UnpackError, Fill, Raw
 from tls13_spec import (
     Record,
     ContentType,
     RecordHeader,
     Version,
-    InnerPlaintext,
+    InnerPlaintextBase,
+    Uint16,
+    ApplicationDataRecord,
+    ChangeCipherSpecRecord,
+    HandshakeRecord,
 )
 from tls_crypto import AeadCipher, Hasher, StreamCipher
+from tls_keycalc import HandshakeTranscript
 
 class PayloadProcessor(ABC):
     @abstractmethod
-    def process_hs_payload(payload: bytes) -> None: ...
+    def process_hs_payload(self, payload: bytes) -> None: ...
 
 @dataclass
 class DataBuffer:
@@ -52,6 +57,69 @@ class HandshakeBuffer(DataBuffer):
             if self.owner is not None:
                 self.owner.process_hs_payload(self.get(size))
 
+class Record(RecordBase):
+    def header(self) -> RecordHeader:
+        return RecordHeader.create(
+            typ = self.typ,
+            version = self.version,
+            size = len(self.payload),
+        )
+
+class InnerPlaintext(InnerPlaintextBase):
+    @override
+    @classmethod
+    def unpack(cls, raw: bytes) -> Self:
+        ct_len = ContentType._BYTE_LENGTH
+        prefix_len = len(raw.rstrip(b'\x00'))
+        if prefix_len < ct_len:
+            raise UnpackError(f"need at least {ct_len} bytes in prefix, got {raw.hex()}")
+        pay_len = prefix_len - ct_len
+        return cls(
+            payload = Raw.unpack(raw[:pay_len]),
+            typ = ContentType.unpack(raw[pay_len:prefix_len]),
+            padding = Fill.unpack(raw[prefix_len:]),
+        )
+
+    @override
+    @classmethod
+    def unpack_from(cls, src: BinaryIO, limit: int|None = None) -> tuple[Self, int]:
+        raise NotImplementedError
+
+    def to_record(self, vers: Version) -> Record:
+        return Record.create(
+            typ = self.typ,
+            version = vers,
+            payload = self.payload,
+        )
+
+@dataclass
+class RecordTranscript:
+    secrets: StoredSecrets
+    is_client: bool
+    records: list[RecordEntry] = field(default_factory=list)
+
+    @classmethod
+    def client(cls, secrets: ClientSecrets) -> Self:
+        return cls(
+            secrets = ClientStoredSecrets(data=secrets).parent(),
+            is_client = True,
+        )
+
+    @classmethod
+    def server(cls, secrets: ServerSecrets) -> Self:
+        return cls(
+            secrets = ClientStoredSecrets(data=secrets).parent(),
+            is_client = False,
+        )
+
+    #TODO FIXME HERE
+    def add_unwrapped(self, record: Record, sent: bool, key_count: int, padding: int):
+        self.records.append(RecordEntry.create(
+            record = record,
+            from_client = (sent if self.is_client else not sent),
+            key_count = key_count,
+            padding = padding,
+        )
 
 @dataclass
 class RecordReader:
@@ -72,7 +140,7 @@ class RecordReader:
         assert self._hs_buffer is None
         self._hs_buffer = val
 
-    def rekey(self, cipher: AeadCipher, hash_alg: Hasher, secret: bytes):
+    def rekey(self, cipher: AeadCipher, hash_alg: Hasher, secret: bytes) -> None:
         logger.info(f"rekeying record reader to key {secret.hex()[:16]}...")
         self._unwrapper = StreamCipher(cipher, hash_alg, secret)
         self._key_count += 1
@@ -80,62 +148,52 @@ class RecordReader:
     def get_next_record(self) -> Record:
         logger.info('trying to fetch a record from the incoming stream')
         try:
-            record = Record.unpack_from(self._file)
+            record, _ = Record.unpack_from(self._file)
         except (UnpackError, EOFError) as e:
             raise TlsError("error reading or unpacking record from server") from e
 
-        logger.info(f'Fetched a record of type {record.typ}')
+        logger.info(f'Fetched a size-{len(record.payload)} record of type {record.typ}')
+
         wrapped = False
+        kc = -1
         padding = 0
 
-        match record.variant:
-            case ChangeCipherSpecRecord() as ccsrec:
-                pass #TODO
-            case HandshakeRecord() as hsrec:
-                pass #TODO
-            case ApplicationDataRecord() as adrec:
-                if self._unwrapper is None:
-                    raise TlsError("got APPLICATION_DATA before setting encryption keys")
-                wrapped = True
-                header = RecordHeader.create(adrec.typ, adrec.version, len(adrec.payload))
-                ptext = self._unwrapper.decrypt(adrec.payload, header.pack())
-                typ, payload, padding = InnerPlaintext.unpack(ptext)
-                logger.info(f'Decrypted record to length-{len(payload)} of type {typ} with padding {padding}')
-                kc = self._key_count
-            case AlertRecord() as alrec:
-                pass #TODO
-
-        if typ == ContentType.APPLICATION_DATA:
-        else:
-            if self._unwrapper is not None and typ != ContentType.CHANGE_CIPHER_SPEC:
-                raise TlsError(f"got unwrapped {typ} record but decryption key has been established")
-            kc = -1
+        if record.typ == RecordType.APPLICATION_DATA and self._unwrapper is not None:
+            wrapped = True
+            ipt = InnerPlaintext.unpack(
+                self._unwrapper.decrypt(
+                    ctext = adrec.payload,
+                    adata = record.header().pack(),
+                )
+            )
+            record = ipt.to_record(record.version)
+            kc = self._key_count
+            padding = ipt.padding.size
+            logger.info(f'Decrypted record to length-{len(record.payload)} of type {record.typ} with padding {padding}')
 
         self._transcript.add(
-            typ         = typ,
-            payload     = payload,
+            record      = record,
             from_client = False,
             key_count   = kc,
             padding     = padding,
-            raw         = Record.pack(record),
         )
 
-        return typ, payload
+        return record
 
-    def fetch(self):
-        typ, payload = self.get_next_record()
+    def fetch(self) -> None:
+        record = self.get_next_record()
 
-        match typ:
-            case ContentType.CHANGE_CIPHER_SPEC:
-                pass # ignore these ones
-            case ContentType.ALERT:
-                raise TlsError(f"Received ALERT: {payload}")
-            case ContentType.HANDSHAKE:
-                self.hs_buffer.add(payload)
-            case ContentType.APPLICATION_DATA:
+        match record.variant:
+            case ChangeCipherSpecRecord():
+                pass # ignore these messages
+            case AlertRecord(data=alrec):
+                raise TlsError(f"Received ALERT: {alrec.payload}")
+            case HandshakeRecord(data=hs):
+                self.hs_buffer.add(hs)
+            case ApplicationDataRecord(data=payload):
                 self._app_data_buffer.add(payload)
             case _:
-                raise TlsError(f"Unexpected message type {typ} received")
+                assert False, "unrecognized record variant"
 
 
 class RecordWriter:
@@ -184,17 +242,6 @@ class RecordWriter:
         force_write(self._file, raw)
         logger.info(f'sent a size-{len(payload)} payload {"" if wrapped else "un"}wrapped in a size-{len(raw)} record')
 
-
-RecordEntry = namedtuple(
-        'RecordEntry',
-        'typ payload from_client key_count padding raw')
-
-class RecordTranscript:
-    def __init__(self, client_secrets):
-        self.records = [client_secrets]
-
-    def add(self, **kwargs):
-        self.records.append(RecordEntry(**kwargs))
 
 
 class Connection:

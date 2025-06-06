@@ -49,12 +49,11 @@ class Spec:
     def unpack(cls, raw: bytes) -> Self:
         raise NotImplementedError
 
-class FullSpec(Spec):
     @classmethod
     def unpack_from(cls, src: BinaryIO, limit: int|None = None) -> tuple[Self, int]:
         raise NotImplementedError
 
-class _Wrapper[T: FullSpec](FullSpec):
+class _Wrapper[T: Spec](Spec):
     _DATA_TYPE: type[T]
 
     def __init__(self, data: T) -> None:
@@ -98,12 +97,14 @@ class _Wrapper[T: FullSpec](FullSpec):
         data, size = cls._DATA_TYPE.unpack_from(src, limit)
         return cls(data=data), size
 
-class _Fixed(FullSpec):
+class _Fixed(Spec):
     _BYTE_LENGTH: int
 
+    @override
     def packed_size(self) -> int:
         return self._BYTE_LENGTH
 
+    @override
     @classmethod
     def unpack_from(cls, src: BinaryIO, limit: int|None = None) -> tuple[Self, int]:
         if limit is not None and limit < cls._BYTE_LENGTH:
@@ -153,6 +154,52 @@ class Empty(_Fixed):
     def unpack_from(cls, src: BinaryIO, limit: int|None = None) -> tuple[Self, int]:
         return (cls(), 0)
 
+class Bool(_Fixed, bool):
+    _BYTE_LENGTH = 1
+    _CREATE_FROM = (('value', bool),)
+
+    def __new__(cls, value: bool) -> Self:
+        return bool.__new__(cls, value)
+
+    def __init__(self, value: bool) -> None:
+        _Fixed.__init__(self)
+
+    @classmethod
+    def create(cls, value: bool) -> Self:
+        return cls(value)
+
+    def uncreate(self) -> bool:
+        return self
+
+    @override
+    def jsonify(self) -> Json:
+        return self
+
+    @override
+    @classmethod
+    def from_json(cls, obj: Json) -> Self:
+        if isinstance(obj, bool):
+            return cls(obj)
+        else:
+            raise ValueError
+
+    @override
+    def pack(self) -> bytes:
+        return int(self).to_bytes(self._BYTE_LENGTH)
+
+    @override
+    @classmethod
+    def unpack(cls, raw: bytes) -> Self:
+        if len(raw) != cls._BYTE_LENGTH:
+            raise ValueError
+        match int.from_bytes(raw):
+            case 0:
+                return cls(False)
+            case 1:
+                return cls(True)
+            case x:
+                raise UnpackError(f"bool should be 0 or 1, got {x}")
+
 class _Integral(_Fixed, int):
     _CREATE_FROM = (('value', int),)
 
@@ -171,9 +218,11 @@ class _Integral(_Fixed, int):
     def uncreate(self) -> int:
         return self
 
+    @override
     def jsonify(self) -> Json:
         return self
 
+    @override
     @classmethod
     def from_json(cls, obj: Json) -> Self:
         if isinstance(obj, int):
@@ -181,12 +230,11 @@ class _Integral(_Fixed, int):
         else:
             raise ValueError
 
-    def packed_size(self) -> int:
-        return self._BYTE_LENGTH
-
+    @override
     def pack(self) -> bytes:
         return self.to_bytes(self._BYTE_LENGTH)
 
+    @override
     @classmethod
     def unpack(cls, raw: bytes) -> Self:
         if len(raw) != cls._BYTE_LENGTH:
@@ -233,6 +281,50 @@ class String(Spec, str):
     def unpack(cls, raw: bytes) -> Self:
         return cls(raw.decode('utf8'))
 
+class Fill(Spec):
+    _CREATE_FROM = (('size', int),)
+
+    def __init__(self, size: int) -> None:
+        self._size = size
+
+    @property
+    def size(self) -> int:
+        return self._size
+
+    @classmethod
+    def create(cls, size: int) -> Self:
+        return cls(size)
+
+    def uncreate(self) -> int:
+        return self.size
+
+    @override
+    def jsonify(self) -> Json:
+        return self.size
+
+    @override
+    @classmethod
+    def from_json(cls, obj: Json) -> Self:
+        if isinstance(obj, int):
+            return cls(obj)
+        raise UnpackError(f"Fill is represented in json as an int, got {obj}")
+
+    @override
+    def packed_size(self) -> int:
+        return self.size
+
+    @override
+    def pack(self) -> bytes:
+        return b'\x00' * self.size
+
+    @override
+    @classmethod
+    def unpack(cls, raw: bytes) -> Self:
+        if any(raw):
+            raise UnpackError(f"Fill must be unpacked from zero bytes, got {raw.hex()}")
+        return cls(len(raw))
+
+
 class Raw(Spec, bytes):
     _CREATE_FROM = (('value', bytes),)
 
@@ -243,25 +335,31 @@ class Raw(Spec, bytes):
     def uncreate(self) -> bytes:
         return self
 
+    @override
     def jsonify(self) -> Json:
         return self.hex()
 
+    @override
     @classmethod
     def from_json(cls, obj: Json) -> Self:
         if isinstance(obj, str):
             return cls(bytes.fromhex(obj))
         raise ValueError
 
+    @override
     def packed_size(self) -> int:
         return len(self)
 
+    @override
     def pack(self) -> bytes:
         return self
 
+    @override
     def pack_to(self, dest: BinaryIO) -> int:
         force_write(dest, self)
         return len(self)
 
+    @override
     @classmethod
     def unpack(cls, raw: bytes) -> Self:
         return cls(raw)
@@ -274,28 +372,33 @@ class _FixRaw(Raw, _Fixed):
         if len(self) != self._BYTE_LENGTH:
             raise ValueError
 
-class _Sequence[T: FullSpec](Spec, tuple[T,...]):
+class _Sequence[T: Spec](Spec, tuple[T,...]):
     _ITEM_TYPE: type[T]
 
     @override
     def jsonify(self) -> Json:
         return [item.jsonify() for item in self]
 
+    @override
     @classmethod
     def from_json(cls, obj: Json) -> Self:
         if isinstance(obj, list):
             return cls(cls._ITEM_TYPE.from_json(entry) for entry in obj)
         raise ValueError
 
+    @override
     def packed_size(self) -> int:
         return sum(item.packed_size() for item in self)
 
+    @override
     def pack(self) -> bytes:
         return b''.join(item.pack() for item in self)
 
+    @override
     def pack_to(self, dest: BinaryIO) -> int:
         return sum(item.pack_to(dest) for item in self)
 
+    @override
     @classmethod
     def unpack(cls, raw: bytes) -> Self:
         buf = BytesIO(raw)
@@ -306,13 +409,13 @@ class _Sequence[T: FullSpec](Spec, tuple[T,...]):
         return cls(elts())
 
 @dataclass(frozen=True)
-class _StructBase(FullSpec):
+class _StructBase(Spec):
     _member_names: ClassVar[tuple[str,...]]
-    _member_types: ClassVar[tuple[type[FullSpec],...]]
-    _member_values: tuple[FullSpec,...] = field(init=False, repr=False, hash=False, compare=False)
+    _member_types: ClassVar[tuple[type[Spec],...]]
+    _member_values: tuple[Spec,...] = field(init=False, repr=False, hash=False, compare=False)
 
     def __post_init__(self) -> None:
-        accum: list[FullSpec] = []
+        accum: list[Spec] = []
         for (name, typ) in zip(self._member_names, self._member_types):
             obj = getattr(self, name)
             if isinstance(obj, typ):
@@ -321,10 +424,12 @@ class _StructBase(FullSpec):
                 raise ValueError(f'expected type {typ} for {name} field in {type(self).__name__}, got {obj}')
         super().__setattr__('_member_values', tuple(accum))
 
+    @override
     def jsonify(self) -> Json:
         return {name: value.jsonify()
                 for (name,value) in zip(self._member_names, self._member_values)}
 
+    @override
     @classmethod
     def from_json(cls, obj: Json) -> Self:
         if isinstance(obj, dict):
@@ -333,15 +438,19 @@ class _StructBase(FullSpec):
             return cls(**accum)
         raise ValueError
 
+    @override
     def packed_size(self) -> int:
         return sum(value.packed_size() for value in self._member_values)
 
+    @override
     def pack(self) -> bytes:
         return b''.join(value.pack() for value in self._member_values)
 
+    @override
     def pack_to(self, dest: BinaryIO) -> int:
         return sum(value.pack_to(dest) for value in self._member_values)
 
+    @override
     @classmethod
     def unpack(cls, raw: bytes) -> Self:
         buf = BytesIO(raw)
@@ -354,6 +463,7 @@ class _StructBase(FullSpec):
             raise ValueError
         return instance
 
+    @override
     @classmethod
     def unpack_from(cls, src: BinaryIO, limit: int|None = None) -> tuple[Self, int]:
         consumed = 0
@@ -366,33 +476,40 @@ class _StructBase(FullSpec):
 class _SpecEnum(_Fixed, IntEnum):
     pass
 
-class _Const[T: Spec](FullSpec):
+class _Const[T: Spec](Spec):
     VALUE: T
 
+    @override
     def jsonify(self) -> Json:
         return self.VALUE.jsonify()
 
+    @override
     @classmethod
     def from_json(cls, obj: Json) -> Self:
         if obj != cls.VALUE.jsonify():
             raise ValueError
         return cls()
 
+    @override
     def packed_size(self) -> int:
         return self.VALUE.packed_size()
 
+    @override
     def pack(self) -> bytes:
         return self.VALUE.pack()
 
+    @override
     def pack_to(self, dest: BinaryIO) -> int:
         return self.VALUE.pack_to(dest)
 
+    @override
     @classmethod
     def unpack(cls, raw: bytes) -> Self:
         if raw != cls.VALUE.pack():
             raise ValueError
         return cls()
 
+    @override
     @classmethod
     def unpack_from(cls, src: BinaryIO, limit: int|None = None) -> tuple[Self, int]:
         raw = cls.VALUE.pack()
@@ -402,7 +519,7 @@ class _Const[T: Spec](FullSpec):
             raise ValueError
         return cls(), len(raw)
 
-class _Selectee[S: _SpecEnum, T: FullSpec](FullSpec):
+class _Selectee[S: _SpecEnum, T: Spec](Spec):
     _SELECT_TYPE: type[S]
     _DATA_TYPE: type[T]
 
@@ -470,7 +587,7 @@ class _Selectee[S: _SpecEnum, T: FullSpec](FullSpec):
         data, dlen = cls._DATA_TYPE.unpack_from(src, limit)
         return cls(typ=typ, data=data), cls._SELECT_TYPE._BYTE_LENGTH + dlen
 
-class _SpecificSelectee[S: _SpecEnum, T: FullSpec](_Selectee[S, T]):
+class _SpecificSelectee[S: _SpecEnum, T: Spec](_Selectee[S, T]):
     _SELECTOR: S
 
     def __init__(self, typ: S|None = None, data: T|None = None) -> None:
@@ -486,27 +603,28 @@ class _SpecificSelectee[S: _SpecEnum, T: FullSpec](_Selectee[S, T]):
             return typ
         raise ValueError
 
-class _Select[S: _SpecEnum](FullSpec):
+class _Select[S: _SpecEnum](Spec):
     _SELECT_TYPE: type[S]
-    _DEFAULT_TYPE: type[_Selectee[S,FullSpec]] | None
-    _SELECTEES: dict[S, type[_Selectee[S,FullSpec]]]
+    _DEFAULT_TYPE: type[_Selectee[S,Spec]] | None
+    _SELECTEES: dict[S, type[_Selectee[S,Spec]]]
 
-    def __init__(self, value: _Selectee[S,FullSpec]) -> None:
-        self._value: _Selectee[S,FullSpec] = value
+    def __init__(self, value: _Selectee[S,Spec]) -> None:
+        self._value: _Selectee[S,Spec] = value
 
     @property
     def typ(self) -> S:
         return self._value.typ
 
     @property
-    def data(self) -> FullSpec:
+    def data(self) -> Spec:
         return self._value.data
 
+    @override
     def jsonify(self) -> Json:
         return self._value.jsonify()
 
     @classmethod
-    def _get_value_cls(cls, selector: S) -> type[_Selectee[S,FullSpec]]:
+    def _get_value_cls(cls, selector: S) -> type[_Selectee[S,Spec]]:
         try:
             return cls._SELECTEES[selector]
         except KeyError:
@@ -515,6 +633,7 @@ class _Select[S: _SpecEnum](FullSpec):
             else:
                 return cls._DEFAULT_TYPE
 
+    @override
     @classmethod
     def from_json(cls, obj: Json) -> Self:
         match obj:
@@ -524,15 +643,19 @@ class _Select[S: _SpecEnum](FullSpec):
                 return cls(value_cls.from_json(obj))
         raise ValueError
 
+    @override
     def packed_size(self) -> int:
         return self._value.packed_size()
 
+    @override
     def pack(self) -> bytes:
         return self._value.pack()
 
+    @override
     def pack_to(self, dest: BinaryIO) -> int:
         return self._value.pack_to(dest)
 
+    @override
     @classmethod
     def unpack(cls, raw: bytes) -> Self:
         slen = cls._SELECT_TYPE._BYTE_LENGTH
@@ -542,6 +665,7 @@ class _Select[S: _SpecEnum](FullSpec):
         value_cls = cls._get_value_cls(selector)
         return cls(value_cls.unpack(raw))
 
+    @override
     @classmethod
     def unpack_from(cls, src: BinaryIO, limit: int|None = None) -> tuple[Self, int]:
         selector, slen = cls._SELECT_TYPE.unpack_from(src, limit)

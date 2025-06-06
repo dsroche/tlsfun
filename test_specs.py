@@ -3,7 +3,7 @@
 from typing import Iterable
 from io import BytesIO
 import spec
-from spec import Spec, FullSpec, Json
+from spec import Spec, Json
 from tls13_spec import *
 import util
 import tls_common
@@ -25,12 +25,15 @@ def test_spec(orig: Spec, js: Json, rawhex: str,) -> None:
     check(orig.pack(), raw)
     check(cls.unpack(raw).pack(), raw)
     check(orig.packed_size(), len(raw))
-    if issubclass(cls, FullSpec):
-        buf = BytesIO()
-        orig.pack_to(buf)
-        check(buf.getvalue(), raw)
-        buf.seek(0)
+    buf = BytesIO()
+    orig.pack_to(buf)
+    check(buf.getvalue(), raw)
+    buf.seek(0)
+    try:
         item, count = cls.unpack_from(buf)
+    except NotImplementedError:
+        pass
+    else:
         check(count, len(raw))
         check(item.jsonify(), js)
 

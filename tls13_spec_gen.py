@@ -5,6 +5,8 @@ from spec import (
     Raw,
     String,
     Empty,
+    Fill,
+    Bool,
 )
 from spec_gen import (
     GenSpec,
@@ -361,23 +363,10 @@ specs: dict[str, GenSpec] = kwdict(
         size = Uint(16),
     ),
 
-    Record = Select('ContentType')(
-        CHANGE_CIPHER_SPEC = Struct(
-            version = 'Version', #TODO const TLS_1_2
-            payload = Bounded(16, Raw), #TODO const b'\x01'
-        ),
-        HANDSHAKE = Struct(
-            version = 'Version',
-            payload = Bounded(16, Raw),
-        ),
-        APPLICATION_DATA = Struct(
-            version = 'Version', #TODO const TLS_1_2
-            payload = Bounded(16, Raw),
-        ),
-        ALERT = Struct(
-            version = 'Version',
-            payload = 'Alert',
-        ),
+    RecordBase = Struct(
+        typ = 'ContentType',
+        vers = 'Version',
+        payload = Bounded(16, Raw),
     ),
 
     CertSecrets = Struct(
@@ -422,6 +411,33 @@ specs: dict[str, GenSpec] = kwdict(
         iv = Bounded(8, Raw),
     ),
 
+    InnerPlaintextBase = Struct(
+        payload = Raw,
+        typ = 'ContentType',
+        padding = Fill,
+    ),
+
+    RecordEntry = Struct(
+        record = 'Record',
+        from_client = Bool,
+        key_count = Uint(16),
+        padding = Uint(16),
+    ),
+
+    ClientServer = EnumSpec(8)(
+        CLIENT = 1,
+        SERVER = 2,
+    ),
+
+    ClientSecrets = Struct(
+        psk = Bounded(8, Raw),
+        kex_sks = Bounded(16, Sequence(Bounded(16, Raw))),
+    ),
+
+    StoredSecrets = Select(ClientServer)(
+        ClientServer.CLIENT = ClientSecrets,
+        ClientServer.SERVER = ServerSecrets,
+    ),
 
     #### XXX remove below TODO
 

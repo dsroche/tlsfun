@@ -295,9 +295,11 @@ class _SpecEnumX(GenSpec):
     def generate(self, dest: TextIO, names: OneToOne[GenSpec,str]) -> None:
         dest.write(dedent(f"""\
             class {names[self]}({names[self._parent]}, spec._SpecEnum):
+                @override
                 def jsonify(self) -> Json:
                     return self.name
 
+                @override
                 @classmethod
                 def from_json(cls, obj: Json) -> Self:
                     if isinstance(obj, int):
@@ -307,9 +309,11 @@ class _SpecEnumX(GenSpec):
                     else:
                         raise ValueError
 
+                @override
                 def pack(self) -> bytes:
                     return self.to_bytes(self._BYTE_LENGTH)
 
+                @override
                 @classmethod
                 def unpack(cls, raw: bytes) -> Self:
                     if len(raw) != cls._BYTE_LENGTH:
@@ -382,7 +386,7 @@ class _BoundedX(GenSpec):
     def generate(self, dest: TextIO, names: OneToOne[GenSpec,str]) -> None:
         nn = get_name(self.inner_type, names)
         dest.write(dedent(f"""\
-            class {names[self]}({nn}, FullSpec):
+            class {names[self]}({nn}, Spec):
                 _LENGTH_TYPES: tuple[type[spec._Integral],...]
 
                 @override
@@ -418,6 +422,7 @@ class _BoundedX(GenSpec):
                         offset += lenlen
                     return super().unpack(raw[offset:])
 
+                @override
                 @classmethod
                 def unpack_from(cls, src: BinaryIO, limit: int|None = None) -> tuple[Self, int]:
                     length: int|None = None
@@ -565,7 +570,7 @@ class _Struct(GenSpec):
             @dataclass(frozen=True)
             class {names[self]}(spec._StructBase):
                 _member_names: ClassVar[tuple[str,...]] = ({','.join(repr(name) for (name,_) in self.schema)},)
-                _member_types: ClassVar[tuple[type[FullSpec],...]] = ({','.join(tname for _,tname,_ in members)},)
+                _member_types: ClassVar[tuple[type[Spec],...]] = ({','.join(tname for _,tname,_ in members)},)
             """))
         # TODO
                 #_CREATE_FROM: ClassVar[tuple[tuple[str,type[Any]],...]] = ({''.join(f'({repr(name)},{creat.item}),' for name,_,creat in members)})
