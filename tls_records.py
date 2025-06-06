@@ -14,13 +14,11 @@ from tls13_spec import (
     RecordHeader,
     Version,
     InnerPlaintextBase,
-    Uint16,
-    ApplicationDataRecord,
-    ChangeCipherSpecRecord,
-    HandshakeRecord,
+    RecordEntry,
+    Transcript,
 )
 from tls_crypto import AeadCipher, Hasher, StreamCipher
-from tls_keycalc import HandshakeTranscript
+from tls_keycalc import KeyCalc, KeyCalcMissing
 
 class PayloadProcessor(ABC):
     @abstractmethod
@@ -57,13 +55,12 @@ class HandshakeBuffer(DataBuffer):
             if self.owner is not None:
                 self.owner.process_hs_payload(self.get(size))
 
-class Record(RecordBase):
-    def header(self) -> RecordHeader:
-        return RecordHeader.create(
-            typ = self.typ,
-            version = self.version,
-            size = len(self.payload),
-        )
+def get_header(record: Record) -> RecordHeader:
+    return RecordHeader.create(
+        typ = record.typ,
+        version = record.version,
+        size = len(record.payload),
+    )
 
 class InnerPlaintext(InnerPlaintextBase):
     @override
@@ -85,46 +82,49 @@ class InnerPlaintext(InnerPlaintextBase):
     def unpack_from(cls, src: BinaryIO, limit: int|None = None) -> tuple[Self, int]:
         raise NotImplementedError
 
-    def to_record(self, vers: Version) -> Record:
+    def to_record(self, version: Version) -> Record:
         return Record.create(
             typ = self.typ,
-            version = vers,
+            version = version,
             payload = self.payload,
         )
 
 @dataclass
 class RecordTranscript:
-    secrets: StoredSecrets
     is_client: bool
+    keys: KeyCalc|None = None
     records: list[RecordEntry] = field(default_factory=list)
 
-    @classmethod
-    def client(cls, secrets: ClientSecrets) -> Self:
-        return cls(
-            secrets = ClientStoredSecrets(data=secrets).parent(),
-            is_client = True,
-        )
-
-    @classmethod
-    def server(cls, secrets: ServerSecrets) -> Self:
-        return cls(
-            secrets = ClientStoredSecrets(data=secrets).parent(),
-            is_client = False,
-        )
-
-    #TODO FIXME HERE
-    def add_unwrapped(self, record: Record, sent: bool, key_count: int, padding: int):
+    def add(self, raw: bytes, record: Record, sent: bool) -> None:
         self.records.append(RecordEntry.create(
-            record = record,
+            raw = raw,
+            record = record.uncreate(),
             from_client = (sent if self.is_client else not sent),
-            key_count = key_count,
-            padding = padding,
+        ))
+
+    def get(self) -> Transcript:
+        psk = b''
+        kex_secret = b''
+        if self.keys is not None:
+            try:
+                psk = self.keys.psk
+            except KeyCalcMissing:
+                pass
+            try:
+                kex_secret = self.keys.kex_secret
+            except KeyCalcMissing:
+                pass
+        return Transcript.create(
+            psk = psk,
+            kex_secret = kex_secret,
+            records = (record.uncreate() for record in self.records),
         )
+
 
 @dataclass
 class RecordReader:
     _file: BinaryIO
-    _transcript: HandshakeTranscript
+    _transcript: RecordTranscript
     _app_data_buffer: DataBuffer
     _unwrapper: StreamCipher|None = None
     _key_count: int = -1
@@ -148,34 +148,29 @@ class RecordReader:
     def get_next_record(self) -> Record:
         logger.info('trying to fetch a record from the incoming stream')
         try:
-            record, _ = Record.unpack_from(self._file)
+            record, rawlen = Record.unpack_from(self._file)
         except (UnpackError, EOFError) as e:
             raise TlsError("error reading or unpacking record from server") from e
+        raw = record.pack()
+        assert len(raw) == rawlen
 
-        logger.info(f'Fetched a size-{len(record.payload)} record of type {record.typ}')
+        logger.info(f'Fetched a size-{rawlen} record of type {record.typ}')
 
-        wrapped = False
-        kc = -1
-        padding = 0
-
-        if record.typ == RecordType.APPLICATION_DATA and self._unwrapper is not None:
+        if record.typ == ContentType.APPLICATION_DATA and self._unwrapper is not None:
             wrapped = True
             ipt = InnerPlaintext.unpack(
                 self._unwrapper.decrypt(
-                    ctext = adrec.payload,
-                    adata = record.header().pack(),
+                    ctext = record.payload,
+                    adata = get_header(record).pack(),
                 )
             )
             record = ipt.to_record(record.version)
-            kc = self._key_count
-            padding = ipt.padding.size
-            logger.info(f'Decrypted record to length-{len(record.payload)} of type {record.typ} with padding {padding}')
+            logger.info(f'Decrypted record to length-{len(record.payload)} of type {record.typ} with padding {ipt.padding.size}')
 
         self._transcript.add(
-            record      = record,
-            from_client = False,
-            key_count   = kc,
-            padding     = padding,
+            raw    = raw,
+            record = record,
+            sent   = False,
         )
 
         return record

@@ -154,26 +154,27 @@ class Empty(_Fixed):
     def unpack_from(cls, src: BinaryIO, limit: int|None = None) -> tuple[Self, int]:
         return (cls(), 0)
 
-class Bool(_Fixed, bool):
+class Bool(_Fixed):
     _BYTE_LENGTH = 1
     _CREATE_FROM = (('value', bool),)
 
-    def __new__(cls, value: bool) -> Self:
-        return bool.__new__(cls, value)
-
     def __init__(self, value: bool) -> None:
-        _Fixed.__init__(self)
+        self._value = value
+
+    @property
+    def value(self) -> bool:
+        return self._value
 
     @classmethod
     def create(cls, value: bool) -> Self:
         return cls(value)
 
     def uncreate(self) -> bool:
-        return self
+        return self.value
 
     @override
     def jsonify(self) -> Json:
-        return self
+        return self.value
 
     @override
     @classmethod
@@ -185,7 +186,7 @@ class Bool(_Fixed, bool):
 
     @override
     def pack(self) -> bytes:
-        return int(self).to_bytes(self._BYTE_LENGTH)
+        return int(self.value).to_bytes(self._BYTE_LENGTH)
 
     @override
     @classmethod

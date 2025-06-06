@@ -359,13 +359,13 @@ specs: dict[str, GenSpec] = kwdict(
 
     RecordHeader = Struct(
         typ  = 'ContentType',
-        vers = 'Version',
+        version = 'Version',
         size = Uint(16),
     ),
 
-    RecordBase = Struct(
+    Record = Struct(
         typ = 'ContentType',
-        vers = 'Version',
+        version = 'Version',
         payload = Bounded(16, Raw),
     ),
 
@@ -418,15 +418,9 @@ specs: dict[str, GenSpec] = kwdict(
     ),
 
     RecordEntry = Struct(
+        raw = Bounded(16, Raw),
         record = 'Record',
         from_client = Bool,
-        key_count = Uint(16),
-        padding = Uint(16),
-    ),
-
-    ClientServer = EnumSpec(8)(
-        CLIENT = 1,
-        SERVER = 2,
     ),
 
     ClientSecrets = Struct(
@@ -434,9 +428,10 @@ specs: dict[str, GenSpec] = kwdict(
         kex_sks = Bounded(16, Sequence(Bounded(16, Raw))),
     ),
 
-    StoredSecrets = Select(ClientServer)(
-        ClientServer.CLIENT = ClientSecrets,
-        ClientServer.SERVER = ServerSecrets,
+    Transcript = Struct(
+        psk = Bounded(8, Raw),
+        kex_secret = Bounded(8, Raw),
+        records = Bounded(32, Sequence('RecordEntry')),
     ),
 
     #### XXX remove below TODO
