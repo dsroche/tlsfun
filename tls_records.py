@@ -2,8 +2,9 @@
 
 from collections import namedtuple
 from dataclasses import dataclass, field
-from abc import ABC, abstractmethod
-from typing import override, ClassVar, BinaryIO
+from abc import ABC, abstractmethod, abstractproperty
+from typing import override, ClassVar, BinaryIO, Self
+import socket
 
 from tls_common import *
 import spec
@@ -16,9 +17,13 @@ from tls13_spec import (
     InnerPlaintextBase,
     RecordEntry,
     Transcript,
+    Alert,
 )
 from tls_crypto import AeadCipher, Hasher, StreamCipher
 from tls_keycalc import KeyCalc, KeyCalcMissing
+
+CCS_PAYLOAD = b'\x01'
+DEFAULT_VERSION = Version.TLS_1_2
 
 class PayloadProcessor(ABC):
     @abstractmethod
@@ -178,110 +183,124 @@ class RecordReader:
     def fetch(self) -> None:
         record = self.get_next_record()
 
-        match record.variant:
-            case ChangeCipherSpecRecord():
-                pass # ignore these messages
-            case AlertRecord(data=alrec):
-                raise TlsError(f"Received ALERT: {alrec.payload}")
-            case HandshakeRecord(data=hs):
-                self.hs_buffer.add(hs)
-            case ApplicationDataRecord(data=payload):
-                self._app_data_buffer.add(payload)
+        match record.typ:
+            case ContentType.CHANGE_CIPHER_SPEC:
+                if record.payload != CCS_PAYLOAD:
+                    raise TlsError(f"CCS payload should be {CCS_PAYLOAD.hex()} but got {record.payload.hex()}")
+                return # ignore these messages
+            case ContentType.HANDSHAKE:
+                self.hs_buffer.add(record.payload)
+            case ContentType.ALERT:
+                alert = Alert.unpack(record.payload)
+                raise TlsError(f"Received ALERT: {alert}")
+            case ContentType.APPLICATION_DATA:
+                self._app_data_buffer.add(record.payload)
             case _:
-                assert False, "unrecognized record variant"
+                raise TlsError(f"Received unexpected record of type {record.typ}")
 
-
+@dataclass
 class RecordWriter:
-    def __init__(self, file, transcript):
-        self._file = file
-        self._transcript = transcript
-        self._wrapper = None
-        self._key_count = -1
+    file: BinaryIO
+    transcript: RecordTranscript
+    wrapper: StreamCipher|None = None
+    key_count: int = -1
 
     @property
-    def max_payload(self):
+    def max_payload(self) -> int:
         return 2**14 - 17
 
-    def rekey(self, cipher, hash_alg, secret):
+    def rekey(self, cipher: AeadCipher, hash_alg: Hasher, secret: bytes) -> None:
         logger.info(f"rekeying record writer to key {secret.hex()[:16]}...")
-        self._wrapper = StreamCipher(cipher, hash_alg, secret)
-        self._key_count += 1
+        self.wrapper = StreamCipher(cipher, hash_alg, secret)
+        self.key_count += 1
 
-    def send(self, typ, payload, vers=Version.TLS_1_2, padding=0):
-        wrapped = self._wrapper is not None and typ != ContentType.CHANGE_CIPHER_SPEC
-        if wrapped:
-            ptext = InnerPlaintext.pack(typ=typ, data=payload, padding=padding)
-            header = RecordHeader.pack(
-                typ  = ContentType.APPLICATION_DATA,
-                vers = Version.TLS_1_2,
-                size = self._wrapper._cipher.ctext_size(len(ptext))
-            )
-            ctext = self._wrapper.encrypt(ptext, header)
+    def send(self, record: Record, padding: int = 0) -> None:
+        if self.wrapper is not None and record.typ != ContentType.CHANGE_CIPHER_SPEC:
+            if record.version != DEFAULT_VERSION:
+                raise ValueError(f"wrapped records should always have version {repr(DEFAULT_VERSION)}")
+            ptext = InnerPlaintext.create(
+                payload = record.payload,
+                typ     = record.typ,
+                padding = padding,
+            ).pack()
+            header = RecordHeader.create(
+                typ     = ContentType.APPLICATION_DATA,
+                version = DEFAULT_VERSION,
+                size    = self.wrapper.cipher.ctext_size(len(ptext))
+            ).pack()
+            ctext = self.wrapper.encrypt(ptext, header)
             logger.info(f'------ encrypted ptext {ptext.hex()[:10]}...{ptext.hex()[-10:]}[len(ptext)] to ctext {ctext.hex()[:10]}...')
             raw = header + ctext
-            Record.unpack(raw) # double check, could be removed
         else:
             if padding:
                 raise ValueError("can't pad unwrapped record")
-            raw = Record.pack((typ, vers), payload)
+            raw = record.pack()
 
-        self._transcript.add(
-            typ         = typ,
-            payload     = payload,
-            from_client = True,
-            key_count   = (self._key_count if wrapped else -1),
-            padding     = padding,
-            raw         = raw,
+        self.transcript.add(
+            raw    = raw,
+            record = record,
+            sent   = True,
         )
 
-        force_write(self._file, raw)
-        logger.info(f'sent a size-{len(payload)} payload {"" if wrapped else "un"}wrapped in a size-{len(raw)} record')
+        force_write(self.file, raw)
+        logger.info(f'sent a size-{len(record.payload)} payload in a size-{len(raw)} record')
 
+class AbstractHandshake(ABC):
+    @abstractproperty
+    def started(self) -> bool: ...
+    @abstractproperty
+    def connected(self) -> bool: ...
+    @abstractproperty
+    def can_send(self) -> bool: ...
+    @abstractproperty
+    def can_recv(self) -> bool: ...
+    @abstractmethod
+    def begin(self, reader: RecordReader, writer: RecordWriter) -> None: ...
 
-
+@dataclass
 class Connection:
-    def __init__(self, secrets, handshake):
-        self._transcript = RecordTranscript(secrets)
-        self._app_data_in = DataBuffer()
-        self._handshake = handshake
+    transcript: RecordTranscript
+    handshake: AbstractHandshake
+    app_data_in: DataBuffer = field(default_factory=DataBuffer)
+    _rreader: RecordReader = field(init=False)
+    _rwriter: RecordWriter = field(init=False)
 
-    @property
-    def transcript(self):
-        return self._transcript
-
-    def connect_socket(self, sock):
+    def connect_socket(self, sock: socket.socket) -> None:
         self.connect_files(
             sock.makefile('rb'),
             sock.makefile('wb'),
         )
 
-    def connect_files(self, instream, outstream):
-        if self._handshake.started:
+    def connect_files(self, instream: BinaryIO, outstream: BinaryIO) -> None:
+        if self.handshake.started:
             raise ValueError("already started! can't connect again")
 
-        self._rreader = RecordReader(instream, self._transcript, self._app_data_in)
-        self._rwriter = RecordWriter(outstream, self._transcript)
+        self._rreader = RecordReader(instream, self.transcript, self.app_data_in)
+        self._rwriter = RecordWriter(outstream, self.transcript)
 
-        self._handshake.begin(self._rreader, self._rwriter)
+        self.handshake.begin(self._rreader, self._rwriter)
 
-        while not self._handshake.connected:
+        while not self.handshake.connected:
             self._rreader.fetch()
 
-    def send(self, appdata):
-        if not self._handshake.can_send:
+    def send(self, appdata: bytes) -> int:
+        if not self.handshake.can_send:
             raise ValueError("can't send application data yet")
         buf = bytearray(appdata)
         maxp = self._rwriter.max_payload
         while buf:
             chunk = buf[:maxp]
-            self._rwriter.send(typ=ContentType.APPLICATION_DATA,
-                               payload=bytes(buf[:maxp]))
+            self._rwriter.send(Record.create(
+                typ = ContentType.APPLICATION_DATA,
+                version = DEFAULT_VERSION,
+                payload = bytes(buf[:maxp])
+            ))
             del buf[:maxp]
         return len(appdata)
 
-    def recv(self, maxsize):
-        if not self._handshake.can_recv:
+    def recv(self, maxsize: int) -> bytes:
+        if not self.handshake.can_recv:
             raise ValueError("can't receive application data yet")
-        while not self._app_data_in:
+        while not self.app_data_in:
             self._rreader.fetch()
-        return self._app_data_in.get(maxsize)
+        return self.app_data_in.get(maxsize)
