@@ -32,6 +32,7 @@ from tls13_spec import (
     ServerTicketPlaintext,
     ServerTicketCiphertext,
     ClientExtensionVariant,
+    HandshakeVariant,
 )
 from tls_crypto import (
     get_hash_alg,
@@ -75,7 +76,7 @@ class TicketInfo(TicketInfoStruct):
         logger.info(f'inserting psk with id {self.ticket_id[:12].hex()}... and  binder {actual_binder.hex()} into client hello')
         return actual_chello
 
-    def get_binder_key(self, chello: ClientHelloHandshake, prefix:Iterable[tuple[Handshake,bool]]=()) -> bytes:
+    def get_binder_key(self, chello: ClientHelloHandshake, prefix:Iterable[tuple[HandshakeVariant,bool]]=()) -> bytes:
         """Computes the binder key for this ticket within the given (unpacked) client hello.
 
         prefix is (optionally) a transcript prefix, e.g. from a hello retry.
@@ -102,7 +103,7 @@ HSTLookup = tuple[HandshakeType,bool] | HandshakeType | int
 class HandshakeTranscript:
     def __init__(self) -> None:
         self._hash_alg: Hasher|None = None
-        self._backlog: list[tuple[Handshake,bool]] = []
+        self._backlog: list[tuple[HandshakeVariant,bool]] = []
 
     @property
     def hash_alg(self) -> Hasher:
@@ -124,7 +125,7 @@ class HandshakeTranscript:
         self._running.update(data)
         return self._running.digest()
 
-    def add(self, hs: Handshake, from_client: bool) -> None:
+    def add(self, hs: HandshakeVariant, from_client: bool) -> None:
         if self._hash_alg is None:
             self._backlog.append((hs, from_client))
         else:
@@ -180,17 +181,15 @@ class KeyCalc:
     def psk(self) -> bytes:
         return self._get_secret('psk')
 
-    @psk.setter
-    def psk(self, value: bytes) -> None:
-        self._set_secret('psk', value)
+    def set_psk(self, value: bytes|None) -> None:
+        self._set_secret('psk', self.zero if value is None else value)
 
     @property
     def kex_secret(self) -> bytes:
         return self._get_secret('kex_secret')
 
-    @kex_secret.setter
-    def kex_secret(self, value: bytes) -> None:
-        self._set_secret('kex_secret', value)
+    def set_kex_secret(self, value: bytes|None) -> None:
+        self._set_secret('kex_secret', self.zero if value is None else value)
 
     @cached_property
     def hash_alg(self) -> Hasher:
@@ -417,7 +416,7 @@ class ServerTicketer:
         return inner.psk
 
 
-def calc_binder_key(chello: ClientHelloHandshake, index: int, secret: bytes, csuite: CipherSuite, prefix: Iterable[tuple[Handshake,bool]] = ()) -> bytes:
+def calc_binder_key(chello: ClientHelloHandshake, index: int, secret: bytes, csuite: CipherSuite, prefix: Iterable[tuple[HandshakeVariant,bool]] = ()) -> bytes:
     """Computes the binder key at given index within given (unpacked) client hello.
 
     The actual binder keys must be filled in (and with the proper lengths)
@@ -454,7 +453,7 @@ def calc_binder_key(chello: ClientHelloHandshake, index: int, secret: bytes, csu
 
     digest = hst.add_partial(raw_hello[:-len(pbinds)])
 
-    kc.psk = secret
+    kc.set_psk(secret)
     binder = kc.get_verify_data(kc.binder_key, digest)
 
     if len(binder) != len(pske.data.binders.data[index]):

@@ -145,8 +145,8 @@ def exact_rstrip(orig: str, suffix: str, new_suffix: str = '') -> str:
 def camel_case(orig: str) -> str:
     return orig.replace('_',' ').title().replace(' ','')
 
-def same_signature[**A,R](original: Callable[A,R]) -> Callable[[Callable[...,Any]],Callable[A,R]]:
+def same_args[**A,R,S](original: Callable[A,R]) -> Callable[[Callable[...,S]],Callable[A,S]]:
     # https://stackoverflow.com/a/77954920
-    def decorate(target: Callable[...,Any]) -> Callable[A,R]:
-        return cast(Callable[A,R], target)
+    def decorate(target: Callable[...,S]) -> Callable[A,S]:
+        return cast(Callable[A,S], target)
     return decorate

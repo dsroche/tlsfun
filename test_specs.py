@@ -9,6 +9,8 @@ import util
 import tls_common
 import tls_crypto
 import tls_keycalc
+import tls_records
+import tls_client
 
 
 def check[T](a: T, b: T) -> None:

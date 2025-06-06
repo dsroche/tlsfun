@@ -1,1 +1,1 @@
-mypy --strict spec.py spec_gen.py tls13_spec_gen.py && ./tls13_spec_gen.py && mypy --strict util.py spec.py tls13_spec.py tls_common.py tls_crypto.py tls_keycalc.py tls_records.py && ./test_specs.py
+mypy --strict spec.py spec_gen.py tls13_spec_gen.py && ./tls13_spec_gen.py && mypy --strict util.py spec.py tls13_spec.py tls_common.py tls_crypto.py tls_keycalc.py tls_records.py tls_client.py && ./test_specs.py
