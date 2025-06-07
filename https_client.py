@@ -4,13 +4,15 @@
 
 import socket
 import argparse
+import logging
+import json
 
 from tls_common import *
-from tls_client import Client
+from tls_client import Client, build_client
 from tls_keycalc import TicketInfo
 
 
-def http_get_req(hostname, path='/'):
+def http_get_req(hostname: str, path: str = '/') -> bytes:
     return b''.join([
         b'GET ',
         path.encode('ascii'),
@@ -20,10 +22,16 @@ def http_get_req(hostname, path='/'):
     ])
 
 
-def tls_http(hostname, port=443, path='/', timeout=None, client=None):
+def tls_http(
+    hostname: str,
+    port    : int         = 443,
+    path    : str         = '/',
+    timeout : float|None  = None,
+    client  : Client|None = None
+) -> bytes:
     if client is None:
         logger.info(f'building client hello with sni {hostname}')
-        client = Client.build(sni=hostname)
+        client = build_client(sni=hostname)
     request = http_get_req(hostname, path)
     worked = False
     with socket.create_connection((hostname, port), timeout=timeout) as sock:
@@ -53,15 +61,17 @@ if __name__ == '__main__':
     if not args.quiet:
         logging.basicConfig(level=logging.INFO)
 
-    ticket = TicketInfo.load(args.use_ticket) if args.use_ticket else None
+    ticket: TicketInfo|None = None
+    if args.use_ticket:
+        ticket = TicketInfo.from_json(json.load(args.use_ticket))
 
-    client = Client.build(sni=args.hostname, ticket=ticket)
+    client = build_client(sni=args.hostname, ticket=ticket)
 
     resp = tls_http(args.hostname, args.port, args.get, args.timeout, client)
 
     if args.store_ticket:
         if client.tickets:
-            client.tickets[0].dump(args.store_ticket)
+            json.dump(client.tickets[0].jsonify(), args.store_ticket)
             if not args.quiet:
                 print(f'\ngot {len(client.tickets)} tickets and saved one')
         elif not args.quiet:

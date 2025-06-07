@@ -468,7 +468,6 @@ class ClientHandshake(AbstractHandshake, PayloadProcessor):
         self.tickets.append(self.key_calc.ticket_info(nst.data, modes=self.psk_modes))
         logger.info("got and stored a reconnect ticket")
 
-
 @dataclass
 class Client(Connection):
     handshake: ClientHandshake
@@ -480,12 +479,6 @@ class Client(Connection):
             handshake = ClientHandshake.create(ch, secrets),
         )
 
-    @same_args(build_client_hello)
-    @classmethod
-    def build(cls, *args: Any, **kwargs: Any) -> Self:
-        ch, secrets = build_client_hello(*args, **kwargs)
-        return cls.create(ch, secrets)
-
     @property
     def tickets(self) -> tuple[TicketInfo,...]:
         return tuple(self.handshake.tickets)
@@ -493,3 +486,9 @@ class Client(Connection):
     @property
     def ech_configs(self) -> tuple[ECHConfigVariant,...]:
         return tuple(self.handshake.ech_configs)
+
+
+@same_args(build_client_hello)
+def build_client(*args: Any, **kwargs: Any) -> Client:
+    ch, secrets = build_client_hello(*args, **kwargs)
+    return Client.create(ch, secrets)
