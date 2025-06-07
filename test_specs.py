@@ -31,13 +31,14 @@ def test_spec(orig: Spec, js: Json, rawhex: str,) -> None:
     orig.pack_to(buf)
     check(buf.getvalue(), raw)
     buf.seek(0)
+    rdr = LimitReader(buf)
     try:
-        item, count = cls.unpack_from(buf)
+        item = cls.unpack_from(rdr)
     except NotImplementedError:
         pass
     else:
-        check(count, len(raw))
         check(item.jsonify(), js)
+        check(rdr.got, raw)
 
 def test_error(cls: type[Spec], js: Json, rawhex: str) -> None:
     raw = bytes.fromhex(rawhex)

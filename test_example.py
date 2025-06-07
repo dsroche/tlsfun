@@ -8,7 +8,8 @@ Be sure to download the example data files first by running
 """
 
 from pathlib import Path
-from tls13_spec import ClientSecrets, ClientHelloHandshake
+from spec import LimitReader
+from tls13_spec import ClientSecrets, ClientHelloHandshake, Record
 from tls_client import Client
 from io import BytesIO
 import logging
@@ -21,7 +22,11 @@ class Example:
     def __init__(self) -> None:
         if not self.capdir.exists():
             raise FileNotFoundError('download example: git clone https://github.com/syncsynchalt/illustrated-tls13')
-        self.client_hello = ClientHelloHandshake.unpack((self.capdir / 'clienthello').read_bytes())
+        self.client_hello = ClientHelloHandshake.unpack(
+            Record.unpack_from(
+                LimitReader((self.capdir / 'clienthello').open('rb'))
+            ).payload
+        )
         self.all_from_client = b''.join((self.capdir / fname).read_bytes() for fname in [
             'clienthello',
             'clientccs',

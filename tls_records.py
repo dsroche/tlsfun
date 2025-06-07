@@ -8,7 +8,7 @@ import socket
 
 from tls_common import *
 import spec
-from spec import force_write, UnpackError, Fill, Raw
+from spec import force_write, UnpackError, Fill, Raw, LimitReader
 from tls13_spec import (
     Record,
     ContentType,
@@ -76,7 +76,7 @@ class InnerPlaintext(InnerPlaintextBase):
         ct_len = ContentType._BYTE_LENGTH
         prefix_len = len(raw.rstrip(b'\x00'))
         if prefix_len < ct_len:
-            raise UnpackError(f"need at least {ct_len} bytes in prefix, got {raw.hex()}")
+            raise UnpackError(raw, f"need at least {ct_len} bytes in prefix, got {raw.hex()}")
         pay_len = prefix_len - ct_len
         return cls(
             payload = Raw.unpack(raw[:pay_len]),
@@ -86,7 +86,7 @@ class InnerPlaintext(InnerPlaintextBase):
 
     @override
     @classmethod
-    def unpack_from(cls, src: BinaryIO, limit: int|None = None) -> tuple[Self, int]:
+    def unpack_from(cls, src: LimitReader) -> Self:
         raise NotImplementedError
 
     def to_record(self, version: Version) -> Record:
@@ -154,14 +154,14 @@ class RecordReader:
 
     def get_next_record(self) -> Record:
         logger.info('trying to fetch a record from the incoming stream')
+        record_src = LimitReader(self._file)
         try:
-            record, rawlen = Record.unpack_from(self._file)
+            record = Record.unpack_from(record_src)
         except (UnpackError, EOFError) as e:
             raise TlsError("error reading or unpacking record from server") from e
-        raw = record.pack()
-        assert len(raw) == rawlen
+        raw: bytes = record_src.got
 
-        logger.info(f'Fetched a size-{rawlen} record of type {record.typ}')
+        logger.info(f'Fetched a size-{len(raw)} record of type {record.typ}')
 
         if record.typ == ContentType.APPLICATION_DATA and self._unwrapper is not None:
             wrapped = True

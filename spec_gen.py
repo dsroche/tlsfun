@@ -423,22 +423,15 @@ class _BoundedX(GenSpec):
 
                 @override
                 @classmethod
-                def unpack_from(cls, src: BinaryIO, limit: int|None = None) -> tuple[Self, int]:
-                    length: int|None = None
-                    readlen = 0
-                    for LT in cls._LENGTH_TYPES:
-                        len2, lenlen = LT.unpack_from(src, limit)
-                        if length is not None and length != lenlen + len2:
-                            raise ValueError
+                def unpack_from(cls, src: LimitReader) -> Self:
+                    lit = iter(cls._LENGTH_TYPES)
+                    length = next(lit).unpack_from(src)
+                    for LT in lit:
+                        len2 = LT.unpack_from(src)
+                        if length != LT._BYTE_LENGTH + len2:
+                            raise UnpackError(src.got, f"bounded length should have been {{length - LT._BYTE_LENGTH}} but got {{len2}}")
                         length = len2
-                        readlen += lenlen
-                        if limit is not None:
-                            limit -= lenlen
-                            if limit < length:
-                                raise ValueError
-                    assert length is not None
-                    raw = force_read(src, length)
-                    return super().unpack(raw), readlen + length
+                    return super().unpack(src.read(length))
             """))
 
     @override

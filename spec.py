@@ -6,22 +6,62 @@ from sys import stdout
 from enum import IntEnum
 import functools
 from textwrap import dedent
+from util import pformat
 
 type Json = int | float | str | bool | None | list[Json] | dict[str, Json]
 
-class UnpackError(ValueError):
-    pass
+ERROR_VAL = '!!! ERROR HERE !!!'
 
-def force_read(src: BinaryIO, size: int) -> bytes:
-    got = src.read(size)
-    if len(got) != size:
-        raise ValueError
-    return got
+@dataclass
+class UnpackError(ValueError):
+    source: bytes|Json
+    description: str
+    partial: Json = ERROR_VAL
+
+    @override
+    def __str__(self) -> str:
+        return dedent(f"""\
+            Error unpacking {pformat(self.source, byteslen=40)}
+            Partial result:
+            {pformat(self.partial)}
+            """)
+
+@dataclass
+class LimitReader:
+    src: BinaryIO
+    limit: int|None = None
+    got: bytearray = field(default_factory=bytearray)
+
+    def read(self, size: int) -> bytes:
+        if self.limit is not None and self.limit < size:
+            limited = self.limit
+            self.read(limited)
+            raise UnpackError(self.got, f"tried to read {size} bytes but limit was {limited}")
+        raw = self.src.read(size)
+        self.got.extend(raw)
+        if len(raw) != size:
+            raise UnpackError(self.got, f"tried to read {size} bytes but only got {len(raw)}")
+        if self.limit is not None:
+            self.limit -= size
+        return raw
+
+    @classmethod
+    def from_raw(cls, raw: bytes) -> Self:
+        return cls(src = BytesIO(raw), limit = len(raw))
+
+    def assert_used_up(self) -> None:
+        if self.limit is None:
+            raise ValueError("can't check used_up when there is no limit")
+        elif self.limit != 0:
+            limited = self.limit
+            extra = self.read(limited)
+            raise UnpackError(self.got, f"extra bytes that should have been used up: {pformat(extra)}")
+
 
 def force_write(dest: BinaryIO, data: bytes) -> None:
     written = dest.write(data)
     if written != len(data):
-        raise ValueError
+        raise ValueError(f"Error trying to write {len(data)} bytes; only wrote {written}")
     dest.flush()
 
 class Spec:
@@ -50,7 +90,7 @@ class Spec:
         raise NotImplementedError
 
     @classmethod
-    def unpack_from(cls, src: BinaryIO, limit: int|None = None) -> tuple[Self, int]:
+    def unpack_from(cls, src: LimitReader) -> Self:
         raise NotImplementedError
 
 class _Wrapper[T: Spec](Spec):
@@ -58,7 +98,7 @@ class _Wrapper[T: Spec](Spec):
 
     def __init__(self, data: T) -> None:
         if not isinstance(data, self._DATA_TYPE):
-            raise ValueError
+            raise ValueError("expected type {self._DATA_TYPE}, got {data}")
         self._data = data
 
     @property
@@ -93,9 +133,8 @@ class _Wrapper[T: Spec](Spec):
 
     @override
     @classmethod
-    def unpack_from(cls, src: BinaryIO, limit: int|None = None) -> tuple[Self, int]:
-        data, size = cls._DATA_TYPE.unpack_from(src, limit)
-        return cls(data=data), size
+    def unpack_from(cls, src: LimitReader) -> Self:
+        return cls(data=cls._DATA_TYPE.unpack_from(src))
 
 class _Fixed(Spec):
     _BYTE_LENGTH: int
@@ -106,11 +145,8 @@ class _Fixed(Spec):
 
     @override
     @classmethod
-    def unpack_from(cls, src: BinaryIO, limit: int|None = None) -> tuple[Self, int]:
-        if limit is not None and limit < cls._BYTE_LENGTH:
-            raise ValueError
-        raw = force_read(src, cls._BYTE_LENGTH)
-        return cls.unpack(raw), cls._BYTE_LENGTH
+    def unpack_from(cls, src: LimitReader) -> Self:
+        return cls.unpack(src.read(cls._BYTE_LENGTH))
 
 class Empty(_Fixed):
     _BYTE_LENGTH: int = 0
@@ -131,7 +167,7 @@ class Empty(_Fixed):
     @classmethod
     def from_json(cls, obj: Json) -> Self:
         if obj is not None:
-            raise ValueError
+            raise UnpackError(obj, "Empty should be None")
         return cls()
 
     @override
@@ -146,13 +182,13 @@ class Empty(_Fixed):
     @classmethod
     def unpack(cls, raw: bytes) -> Self:
         if len(raw):
-            raise ValueError
+            raise UnpackError(raw, "Empty should be b''")
         return cls()
 
     @override
     @classmethod
-    def unpack_from(cls, src: BinaryIO, limit: int|None = None) -> tuple[Self, int]:
-        return (cls(), 0)
+    def unpack_from(cls, src: LimitReader) -> Self:
+        return cls()
 
 class Bool(_Fixed):
     _BYTE_LENGTH = 1
@@ -182,7 +218,7 @@ class Bool(_Fixed):
         if isinstance(obj, bool):
             return cls(obj)
         else:
-            raise ValueError
+            raise UnpackError(obj, "bool should be bool")
 
     @override
     def pack(self) -> bytes:
@@ -192,14 +228,14 @@ class Bool(_Fixed):
     @classmethod
     def unpack(cls, raw: bytes) -> Self:
         if len(raw) != cls._BYTE_LENGTH:
-            raise ValueError
+            raise UnpackError(raw, "expected {cls._BYTE_LENGTH} bytes got {raw.hex()}")
         match int.from_bytes(raw):
             case 0:
                 return cls(False)
             case 1:
                 return cls(True)
             case x:
-                raise UnpackError(f"bool should be 0 or 1, got {x}")
+                raise UnpackError(raw, "bool must be 0 or 1")
 
 class _Integral(_Fixed, int):
     _CREATE_FROM = (('value', int),)
@@ -209,8 +245,9 @@ class _Integral(_Fixed, int):
 
     def __init__(self, value: int) -> None:
         _Fixed.__init__(self)
-        if not (0 <= value < 2**(self._BYTE_LENGTH * 8)):
-            raise ValueError
+        upper = 2**(self._BYTE_LENGTH * 8)
+        if not (0 <= value < upper):
+            raise ValueError("{value} is not between 0 and {upper}")
 
     @classmethod
     def create(cls, value: int) -> Self:
@@ -229,7 +266,7 @@ class _Integral(_Fixed, int):
         if isinstance(obj, int):
             return cls(obj)
         else:
-            raise ValueError
+            raise UnpackError(obj, "expected int, got {obj}")
 
     @override
     def pack(self) -> bytes:
@@ -239,7 +276,7 @@ class _Integral(_Fixed, int):
     @classmethod
     def unpack(cls, raw: bytes) -> Self:
         if len(raw) != cls._BYTE_LENGTH:
-            raise ValueError
+            raise UnpackError(raw, "expected {cls._BYTE_LENGTH} bytes, got {raw.hex()}")
         return cls(int.from_bytes(raw))
 
 class String(Spec, str):
@@ -261,7 +298,7 @@ class String(Spec, str):
     def from_json(cls, obj: Json) -> Self:
         if isinstance(obj, str):
             return cls(obj)
-        raise ValueError
+        raise UnpackError(obj, "expected string, got {obj}")
 
     @override
     def packed_size(self) -> int:
@@ -308,7 +345,7 @@ class Fill(Spec):
     def from_json(cls, obj: Json) -> Self:
         if isinstance(obj, int):
             return cls(obj)
-        raise UnpackError(f"Fill is represented in json as an int, got {obj}")
+        raise UnpackError(obj, "Json representation of Fill must be int")
 
     @override
     def packed_size(self) -> int:
@@ -322,7 +359,7 @@ class Fill(Spec):
     @classmethod
     def unpack(cls, raw: bytes) -> Self:
         if any(raw):
-            raise UnpackError(f"Fill must be unpacked from zero bytes, got {raw.hex()}")
+            raise UnpackError(raw, "Fill should be all zero bytes")
         return cls(len(raw))
 
 
@@ -345,7 +382,7 @@ class Raw(Spec, bytes):
     def from_json(cls, obj: Json) -> Self:
         if isinstance(obj, str):
             return cls(bytes.fromhex(obj))
-        raise ValueError
+        raise UnpackError(obj, "expected hex string, got {obj}")
 
     @override
     def packed_size(self) -> int:
@@ -371,7 +408,7 @@ class _FixRaw(Raw, _Fixed):
 
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         if len(self) != self._BYTE_LENGTH:
-            raise ValueError
+            raise ValueError("expected {self._BYTE_LENGTH} bytes, got {self.hex()}")
 
 class _Sequence[T: Spec](Spec, tuple[T,...]):
     _ITEM_TYPE: type[T]
@@ -385,7 +422,7 @@ class _Sequence[T: Spec](Spec, tuple[T,...]):
     def from_json(cls, obj: Json) -> Self:
         if isinstance(obj, list):
             return cls(cls._ITEM_TYPE.from_json(entry) for entry in obj)
-        raise ValueError
+        raise UnpackError(obj, "expected list of {cls._ITEM_TYPE}, got {obj}")
 
     @override
     def packed_size(self) -> int:
@@ -402,11 +439,10 @@ class _Sequence[T: Spec](Spec, tuple[T,...]):
     @override
     @classmethod
     def unpack(cls, raw: bytes) -> Self:
-        buf = BytesIO(raw)
+        buf = LimitReader.from_raw(raw)
         def elts() -> Iterable[T]:
-            while buf.tell() != len(raw):
-                item, _ = cls._ITEM_TYPE.unpack_from(buf)
-                yield item
+            while buf.limit:
+                yield cls._ITEM_TYPE.unpack_from(buf)
         return cls(elts())
 
 @dataclass(frozen=True)
@@ -437,7 +473,7 @@ class _StructBase(Spec):
             accum = {name: typ.from_json(obj[name])
                      for (name,typ) in zip(cls._member_names, cls._member_types)}
             return cls(**accum)
-        raise ValueError
+        raise UnpackError(obj, "expected dict, got {obj}")
 
     @override
     def packed_size(self) -> int:
@@ -454,25 +490,22 @@ class _StructBase(Spec):
     @override
     @classmethod
     def unpack(cls, raw: bytes) -> Self:
-        buf = BytesIO(raw)
+        buf = LimitReader.from_raw(raw)
         offset = 0
         # XXX mypy doesn't know about __func__
-        instance, got = _StructBase.unpack_from.__func__(cls, buf, len(raw)) # type: ignore
+        instance = _StructBase.unpack_from.__func__(cls, buf) # type: ignore
         # XXX mypy doesn't realize that instance must be of type Self here
         assert isinstance(instance, cls)
-        if got != len(raw):
-            raise ValueError
+        buf.assert_used_up()
         return instance
 
     @override
     @classmethod
-    def unpack_from(cls, src: BinaryIO, limit: int|None = None) -> tuple[Self, int]:
-        consumed = 0
+    def unpack_from(cls, src: LimitReader) -> Self:
         accum = {}
         for (name, typ) in zip(cls._member_names, cls._member_types):
-            accum[name], got = typ.unpack_from(src, None if limit is None else (limit - consumed))
-            consumed += got
-        return cls(**accum), consumed
+            accum[name] = typ.unpack_from(src)
+        return cls(**accum)
 
 class _SpecEnum(_Fixed, IntEnum):
     pass
@@ -487,8 +520,9 @@ class _Const[T: Spec](Spec):
     @override
     @classmethod
     def from_json(cls, obj: Json) -> Self:
-        if obj != cls.VALUE.jsonify():
-            raise ValueError
+        expected = cls.VALUE.jsonify()
+        if obj != expected:
+            raise UnpackError(obj, f"expected {expected}, got {obj}")
         return cls()
 
     @override
@@ -506,19 +540,19 @@ class _Const[T: Spec](Spec):
     @override
     @classmethod
     def unpack(cls, raw: bytes) -> Self:
-        if raw != cls.VALUE.pack():
-            raise ValueError
+        expected = cls.VALUE.pack()
+        if raw != expected:
+            raise UnpackError(raw, f"expected {expected.hex()}, got {raw.hex()}")
         return cls()
 
     @override
     @classmethod
-    def unpack_from(cls, src: BinaryIO, limit: int|None = None) -> tuple[Self, int]:
+    def unpack_from(cls, src: LimitReader) -> Self:
         raw = cls.VALUE.pack()
-        if limit is not None and limit < len(raw):
-            raise ValueError
-        if force_read(src, len(raw)) != raw:
-            raise ValueError
-        return cls(), len(raw)
+        got = src.read(len(raw))
+        if got != raw:
+            raise UnpackError(got, "expected const {pformat(raw)}, got {pformat(got)}")
+        return cls()
 
 class _Selectee[S: _SpecEnum, T: Spec](Spec):
     _SELECT_TYPE: type[S]
@@ -578,15 +612,14 @@ class _Selectee[S: _SpecEnum, T: Spec](Spec):
 
     @override
     @classmethod
-    def unpack_from(cls, src: BinaryIO, limit: int|None = None) -> tuple[Self, int]:
-        typ, tlen = cls._SELECT_TYPE.unpack_from(src, limit)
-        return cls.unpack_from_data(typ, src, (None if limit is None else limit-tlen))
+    def unpack_from(cls, src: LimitReader) -> Self:
+        typ = cls._SELECT_TYPE.unpack_from(src)
+        return cls.unpack_from_data(typ, src)
 
     @classmethod
-    def unpack_from_data(cls, typ: S, src: BinaryIO, limit: int|None = None) -> tuple[Self, int]:
-        typ = cls._check_typ(typ)
-        data, dlen = cls._DATA_TYPE.unpack_from(src, limit)
-        return cls(typ=typ, data=data), cls._SELECT_TYPE._BYTE_LENGTH + dlen
+    def unpack_from_data(cls, typ: S, src: LimitReader) -> Self:
+        return cls(typ = cls._check_typ(typ),
+                   data = cls._DATA_TYPE.unpack_from(src))
 
 class _SpecificSelectee[S: _SpecEnum, T: Spec](_Selectee[S, T]):
     _SELECTOR: S
@@ -668,8 +701,6 @@ class _Select[S: _SpecEnum](Spec):
 
     @override
     @classmethod
-    def unpack_from(cls, src: BinaryIO, limit: int|None = None) -> tuple[Self, int]:
-        selector, slen = cls._SELECT_TYPE.unpack_from(src, limit)
-        value_cls = cls._get_value_cls(selector)
-        value, got = value_cls.unpack_from_data(selector, src, (None if limit is None else limit-slen))
-        return cls(value), got
+    def unpack_from(cls, src: LimitReader) -> Self:
+        selector = cls._SELECT_TYPE.unpack_from(src)
+        return cls(cls._get_value_cls(selector).unpack_from_data(selector, src))
