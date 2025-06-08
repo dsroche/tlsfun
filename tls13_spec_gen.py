@@ -302,7 +302,7 @@ specs: dict[str, GenSpec] = kwdict(
         SIGNATURE_ALGORITHMS =
             Bounded(16, Sequence('SignatureScheme')),
         SUPPORTED_VERSIONS =
-            Bounded(8, Sequence('Version')),
+            Sequence('Version'),
         KEY_SHARE = 'KeyShareEntry',
         TICKET_REQUEST = Struct(expected_count = Uint(8)),
         PRE_SHARED_KEY = Uint(16),

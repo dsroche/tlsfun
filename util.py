@@ -10,7 +10,7 @@ import pprint
 type _Pretty = str | list[_Pretty] | dict[str, _Pretty]
 
 def _pretty_prep(obj: Any, byteslen: int|None=None) -> _Pretty :
-    if isinstance(obj, bytes):
+    if isinstance(obj, bytes) or isinstance(obj, bytearray):
         if byteslen is not None and len(obj) > byteslen:
             return f"{obj[:byteslen//2].hex()}...{obj[-byteslen//2:].hex()}"
         else:

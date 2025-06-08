@@ -22,9 +22,13 @@ class UnpackError(ValueError):
     def __str__(self) -> str:
         return dedent(f"""\
             Error unpacking {pformat(self.source, byteslen=40)}
+            {self.description}
             Partial result:
             {pformat(self.partial)}
             """)
+
+    def above(self, source: bytes|Json, partial: Json) -> Self:
+        return type(self)(source, self.description, partial)
 
 @dataclass
 class LimitReader:
@@ -440,10 +444,15 @@ class _Sequence[T: Spec](Spec, tuple[T,...]):
     @classmethod
     def unpack(cls, raw: bytes) -> Self:
         buf = LimitReader.from_raw(raw)
-        def elts() -> Iterable[T]:
-            while buf.limit:
-                yield cls._ITEM_TYPE.unpack_from(buf)
-        return cls(elts())
+        elts: list[T] = []
+        while buf.limit:
+            try:
+                elts.append(cls._ITEM_TYPE.unpack_from(buf))
+            except UnpackError as e:
+                pelts: list[Json] = [str(x) for x in elts]
+                pelts.append(e.partial)
+                raise e.above(raw, pelts) from e
+        return cls(elts)
 
 @dataclass(frozen=True)
 class _StructBase(Spec):
@@ -493,7 +502,10 @@ class _StructBase(Spec):
         buf = LimitReader.from_raw(raw)
         offset = 0
         # XXX mypy doesn't know about __func__
-        instance = _StructBase.unpack_from.__func__(cls, buf) # type: ignore
+        try:
+            instance = _StructBase.unpack_from.__func__(cls, buf) # type: ignore
+        except UnpackError as e:
+            raise e.above(raw, e.partial) from e
         # XXX mypy doesn't realize that instance must be of type Self here
         assert isinstance(instance, cls)
         buf.assert_used_up()
@@ -504,11 +516,18 @@ class _StructBase(Spec):
     def unpack_from(cls, src: LimitReader) -> Self:
         accum = {}
         for (name, typ) in zip(cls._member_names, cls._member_types):
-            accum[name] = typ.unpack_from(src)
+            try:
+                accum[name] = typ.unpack_from(src)
+            except UnpackError as e:
+                part = {oname: val.jsonify() for oname,val in accum.items()}
+                part[name] = e.partial
+                raise e.above(src.got, part) from e
         return cls(**accum)
 
 class _SpecEnum(_Fixed, IntEnum):
-    pass
+    @override
+    def __str__(self) -> str:
+        return f'{type(self).__name__}.{self.name}'
 
 class _Const[T: Spec](Spec):
     VALUE: T
@@ -608,7 +627,10 @@ class _Selectee[S: _SpecEnum, T: Spec](Spec):
         if len(raw) < tlen:
             raise ValueError
         typ = cls._check_typ(cls._SELECT_TYPE.unpack(raw[:tlen]))
-        return cls(typ=typ, data=cls._DATA_TYPE.unpack(raw[tlen:]))
+        try:
+            return cls(typ=typ, data=cls._DATA_TYPE.unpack(raw[tlen:]))
+        except UnpackError as e:
+            raise e.above(raw, {'typ': str(typ), 'data': e.partial}) from e
 
     @override
     @classmethod
@@ -618,8 +640,12 @@ class _Selectee[S: _SpecEnum, T: Spec](Spec):
 
     @classmethod
     def unpack_from_data(cls, typ: S, src: LimitReader) -> Self:
-        return cls(typ = cls._check_typ(typ),
-                   data = cls._DATA_TYPE.unpack_from(src))
+        typ = cls._check_typ(typ)
+        try:
+            data = cls._DATA_TYPE.unpack_from(src)
+        except UnpackError as e:
+            raise e.above(src.got, {'typ': typ, 'data': e.partial}) from e
+        return cls(typ=typ, data=data)
 
 class _SpecificSelectee[S: _SpecEnum, T: Spec](_Selectee[S, T]):
     _SELECTOR: S
@@ -697,10 +723,16 @@ class _Select[S: _SpecEnum](Spec):
             raise ValueError
         selector = cls._SELECT_TYPE.unpack(raw[:slen])
         value_cls = cls._get_value_cls(selector)
-        return cls(value_cls.unpack(raw))
+        try:
+            return cls(value_cls.unpack(raw))
+        except UnpackError as e:
+            raise e.above(raw, {'typ': str(selector), 'data': e.partial}) from e
 
     @override
     @classmethod
     def unpack_from(cls, src: LimitReader) -> Self:
         selector = cls._SELECT_TYPE.unpack_from(src)
-        return cls(cls._get_value_cls(selector).unpack_from_data(selector, src))
+        try:
+            return cls(cls._get_value_cls(selector).unpack_from_data(selector, src))
+        except UnpackError as e:
+            raise e.above(src.got, {'typ': str(selector), 'data': e.partial}) from e

@@ -419,7 +419,10 @@ class _BoundedX(GenSpec):
                         if len(raw) != offset + lenlen + length:
                             raise ValueError
                         offset += lenlen
-                    return super().unpack(raw[offset:])
+                    try:
+                        return super().unpack(raw[offset:])
+                    except UnpackError as e:
+                        raise e.above(raw, {{'bounded_size': length, 'data': e.partial}}) from e
 
                 @override
                 @classmethod
@@ -431,7 +434,11 @@ class _BoundedX(GenSpec):
                         if length != LT._BYTE_LENGTH + len2:
                             raise UnpackError(src.got, f"bounded length should have been {{length - LT._BYTE_LENGTH}} but got {{len2}}")
                         length = len2
-                    return super().unpack(src.read(length))
+                    supraw = src.read(length)
+                    try:
+                        return super().unpack(supraw)
+                    except UnpackError as e:
+                        raise e.above(src.got, {{'bounded_size': length, 'data': e.partial}}) from e
             """))
 
     @override
