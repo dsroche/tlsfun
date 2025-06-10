@@ -16,10 +16,10 @@ from tls13_spec import (
     ClientStates,
     HandshakeType,
     Record,
-    ContentType, ContentTypes,
-    PskKeyExchangeMode, PskKeyExchangeModes,
+    ContentType,
+    PskKeyExchangeMode,
     ExtensionTypes,
-    Version, Versions,
+    Version,
     ClientExtension,
     ECHClientHelloType,
     HpkeKdfId,
@@ -143,7 +143,7 @@ def build_client_hello(
     ))
 
     # which groups supported for key exchange
-    extensions.append(SupportedGroupsClientExtension.create(g.value for g in kex_groups))
+    extensions.append(SupportedGroupsClientExtension.create(kex_groups))
 
     # more backwards compatibility empty info,
     # probably not necessary but who knows
@@ -161,23 +161,23 @@ def build_client_hello(
     ))
 
     # which signature algorithms allowed for CertificateVerify message
-    extensions.append(SignatureAlgorithmsClientExtension.create(a.value for a in sig_algs))
+    extensions.append(SignatureAlgorithmsClientExtension.create(sig_algs))
 
     # indicate only TLS 1.3 is supported
-    extensions.append(SupportedVersionsClientExtension.create([Versions.TLS_1_3]))
+    extensions.append(SupportedVersionsClientExtension.create([Version.TLS_1_3]))
 
     # indicate whether DHE must still be done on resumption with a ticket
-    extensions.append(PskKeyExchangeModesClientExtension.create(m.value for m in psk_modes))
+    extensions.append(PskKeyExchangeModesClientExtension.create(psk_modes))
 
     if shares:
         # send the DHE public key
-        extensions.append(KeyShareClientExtension.create((g.value, b) for g,b in shares))
+        extensions.append(KeyShareClientExtension.create(shares))
 
     # add GREASE ECH if requested
     if grease_ech:
         extensions.append(EncryptedClientHelloClientExtension.create(
             variant = OuterECHClientHello.create(
-                cipher_suite = (DEFAULT_HPKE_CSUITES[0][0].value, DEFAULT_HPKE_CSUITES[0][1].value),
+                cipher_suite = DEFAULT_HPKE_CSUITES[0],
                 config_id = rgen.randrange(2**8),
                 enc = rgen.randbytes(32),
                 payload = rgen.randbytes(239),
@@ -186,7 +186,7 @@ def build_client_hello(
 
     # calculate client hello handshake message
     ch = ClientHelloHandshake.create(
-        legacy_version     = DEFAULT_LEGACY_VERSION.value,
+        legacy_version     = DEFAULT_LEGACY_VERSION,
         client_random      = rgen.randbytes(32),
         session_id         = rgen.randbytes(32),
         ciphers            = (c.value for c in ciphers),
@@ -210,7 +210,7 @@ class ClientHandshake(AbstractHandshake, PayloadProcessor):
     psk            : bytes|None                   = None
     sni            : str|None                     = None
     kexes          : dict[NamedGroup, bytes]      = field(default_factory=dict)
-    psk_modes      : Iterable[PskKeyExchangeMode] = (m.parent() for m in PskKeyExchangeModes)
+    psk_modes      : Iterable[PskKeyExchangeMode] = PskKeyExchangeMode.all()
     hs_trans       : HandshakeTranscript          = field(default_factory=HandshakeTranscript)
     key_calc       : KeyCalc                      = field(init=False)
     tickets        : list[TicketInfo]             = field(default_factory=list)
@@ -228,7 +228,7 @@ class ClientHandshake(AbstractHandshake, PayloadProcessor):
         sni: str|None = None
         kexes: dict[NamedGroup, bytes] = {}
 
-        psk_modes = tuple(mode.parent() for mode in PskKeyExchangeModes) # allow all modes if not specified
+        psk_modes = PskKeyExchangeMode.all()
 
         for ext in ch.data.extensions.uncreate():
             match ext:
@@ -293,15 +293,15 @@ class ClientHandshake(AbstractHandshake, PayloadProcessor):
         logger.info(f"sending hs message {msg.typ} to server")
         raw = msg.pack()
         self._rwriter.send(Record.create(
-            typ     = ContentTypes.HANDSHAKE.value,
-            version = vers.value,
+            typ     = ContentType.HANDSHAKE,
+            version = vers,
             payload = raw,
         ))
         self.hs_trans.add(hs=msg, from_client=True)
 
     def send_hello(self) -> None:
         assert self.state == ClientStates.START
-        self._send_hs_msg(self.chello, Versions.TLS_1_0.parent())
+        self._send_hs_msg(self.chello, Version.TLS_1_0)
         self.state = ClientStates.WAIT_SH
 
     @override
@@ -350,7 +350,7 @@ class ClientHandshake(AbstractHandshake, PayloadProcessor):
                         raise TlsError(f"no implementation for kex group {group}")
                     kex_secret = kex.exchange(private, ext.data.pubkey)
                 case SupportedVersionsServerExtension():
-                    assert any(v.typ == Versions.TLS_1_3 for v in ext.data)
+                    assert any(v == Version.TLS_1_3 for v in ext.data)
                 case PreSharedKeyServerExtension():
                     if ext.data != 0:
                         raise TlsError(f'unexpected index in PRE_SHARED_KEY: {ext.data}')
@@ -360,10 +360,10 @@ class ClientHandshake(AbstractHandshake, PayloadProcessor):
 
         match ((kex_secret is not None), (self.psk is not None), got_psk):
             case (True, True, True):
-                if not any(m.typ == PskKeyExchangeModes.PSK_DHE_KE for m in self.psk_modes):
+                if not any(m == PskKeyExchangeMode.PSK_DHE_KE for m in self.psk_modes):
                     raise TlsError("server wants PSK_DHE_KE but client didn't ask for it")
             case (False, True, True):
-                if not any(m.typ == PskKeyExchangeModes.PSK_KE for m in self.psk_modes):
+                if not any(m == PskKeyExchangeMode.PSK_KE for m in self.psk_modes):
                     raise TlsError("server wants PSK_KE but client didn't ask for it")
             case (True, False, False):
                 pass
@@ -447,8 +447,8 @@ class ClientHandshake(AbstractHandshake, PayloadProcessor):
 
         logger.info(f"Sending change cipher spec to server")
         self._rwriter.send(Record.create(
-            typ     = ContentTypes.CHANGE_CIPHER_SPEC,
-            version = DEFAULT_LEGACY_VERSION.value,
+            typ     = ContentType.CHANGE_CIPHER_SPEC,
+            version = DEFAULT_LEGACY_VERSION,
             payload = CCS_PAYLOAD,
         ))
 

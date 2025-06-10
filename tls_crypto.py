@@ -42,17 +42,17 @@ from tls13_spec import (
     CertSecrets,
     EchSecrets,
     ServerSecrets,
-    NamedGroup, NamedGroups,
-    SignatureScheme, SignatureSchemes,
-    CipherSuite, CipherSuites,
+    NamedGroup,
+    SignatureScheme,
+    CipherSuite,
     HkdfLabel,
-    HpkeKemId, HpkeKemIds,
-    HpkeKdfId, HpkeKdfIds,
-    HpkeAeadId, HpkeAeadIds,
+    HpkeKemId,
+    HpkeKdfId,
+    HpkeAeadId,
     PyhpkeKeypair,
     KeyConfig,
     Draft24ECHConfig,
-    PskKeyExchangeMode, PskKeyExchangeModes,
+    PskKeyExchangeMode,
 )
 
 _PycaXPublicKey = X25519PublicKey | X448PublicKey
@@ -110,26 +110,26 @@ def get_kex_alg(group: NamedGroup) -> KexAlg:
         kex.get_public(private) -> public
         kex.exchange(private, public) -> shared_secret
     """
-    match group.typ:
-        case NamedGroups.X25519:
+    match group:
+        case NamedGroup.X25519:
             return _XKex(X25519PrivateKey, X25519PublicKey, 32)
-        case NamedGroups.X448:
+        case NamedGroup.X448:
             return _XKex(X448PrivateKey, X448PublicKey, 56)
         case _:
             raise ValueError(f"no implementation for key exchange in {group}")
 
 
 DEFAULT_KEX_GROUPS: tuple[NamedGroup,...] = (
-    NamedGroups.X25519.parent(),
-    NamedGroups.SECP256R1.parent(),
-    NamedGroups.X448.parent(),
-    NamedGroups.SECP521R1.parent(),
-    NamedGroups.SECP384R1.parent(),
-    NamedGroups.FFDHE2048.parent(),
-    NamedGroups.FFDHE3072.parent(),
-    NamedGroups.FFDHE4096.parent(),
-    NamedGroups.FFDHE6144.parent(),
-    NamedGroups.FFDHE8192.parent(),
+    NamedGroup.X25519,
+    NamedGroup.SECP256R1,
+    NamedGroup.X448,
+    NamedGroup.SECP521R1,
+    NamedGroup.SECP384R1,
+    NamedGroup.FFDHE2048,
+    NamedGroup.FFDHE3072,
+    NamedGroup.FFDHE4096,
+    NamedGroup.FFDHE6144,
+    NamedGroup.FFDHE8192,
 )
 
 class SigAlg(ABC):
@@ -303,31 +303,31 @@ def get_sig_alg(scheme: SignatureScheme) -> SigAlg:
             (*** note we are using a return value here instead of exceptions
                  as is more typical in secure implementations!)
     """
-    match scheme.typ:
-        case SignatureSchemes.ECDSA_SECP256R1_SHA256:
+    match scheme:
+        case SignatureScheme.ECDSA_SECP256R1_SHA256:
             return _PycaECDSA(SECP256R1(), SHA256(), 256)
-        case SignatureSchemes.ECDSA_SECP384R1_SHA384:
+        case SignatureScheme.ECDSA_SECP384R1_SHA384:
             return _PycaECDSA(SECP384R1(), SHA384(), 384)
-        case SignatureSchemes.ECDSA_SECP521R1_SHA512:
+        case SignatureScheme.ECDSA_SECP521R1_SHA512:
             return _PycaECDSA(SECP521R1(), SHA512(), 512)
 
-        case SignatureSchemes.ED25519:
+        case SignatureScheme.ED25519:
             return _PycaEdDSA(Ed25519PrivateKey, 32)
-        case SignatureSchemes.ED448:
+        case SignatureScheme.ED448:
             return _PycaEdDSA(Ed448PrivateKey, 57)
 
-        case (SignatureSchemes.RSA_PSS_RSAE_SHA256 | SignatureSchemes.RSA_PSS_PSS_SHA256):
+        case (SignatureScheme.RSA_PSS_RSAE_SHA256 | SignatureScheme.RSA_PSS_PSS_SHA256):
             return _PycaRSA(_pss_padder, SHA256())
-        case (SignatureSchemes.RSA_PSS_RSAE_SHA384 | SignatureSchemes.RSA_PSS_PSS_SHA384()):
+        case (SignatureScheme.RSA_PSS_RSAE_SHA384 | SignatureScheme.RSA_PSS_PSS_SHA384()):
             return _PycaRSA(_pss_padder, SHA384())
-        case (SignatureSchemes.RSA_PSS_RSAE_SHA512 | SignatureSchemes.RSA_PSS_PSS_SHA512()):
+        case (SignatureScheme.RSA_PSS_RSAE_SHA512 | SignatureScheme.RSA_PSS_PSS_SHA512()):
             return _PycaRSA(_pss_padder, SHA512())
 
-        case SignatureSchemes.RSA_PKCS1_SHA256:
+        case SignatureScheme.RSA_PKCS1_SHA256:
             return _PycaRSA(_pkcs_padder, SHA256())
-        case SignatureSchemes.RSA_PKCS1_SHA384:
+        case SignatureScheme.RSA_PKCS1_SHA384:
             return _PycaRSA(_pkcs_padder, SHA384())
-        case SignatureSchemes.RSA_PKCS1_SHA512:
+        case SignatureScheme.RSA_PKCS1_SHA512:
             return _PycaRSA(_pkcs_padder, SHA512())
 
         case _:
@@ -335,20 +335,20 @@ def get_sig_alg(scheme: SignatureScheme) -> SigAlg:
 
 
 DEFAULT_SIGNATURE_SCHEMES: tuple[SignatureScheme,...] = (
-	SignatureSchemes.ECDSA_SECP256R1_SHA256.parent(),
-	SignatureSchemes.ECDSA_SECP384R1_SHA384.parent(),
-	SignatureSchemes.ECDSA_SECP521R1_SHA512.parent(),
-	SignatureSchemes.ED25519.parent(),
-	SignatureSchemes.ED448.parent(),
-	SignatureSchemes.RSA_PSS_PSS_SHA256.parent(),
-	SignatureSchemes.RSA_PSS_PSS_SHA384.parent(),
-	SignatureSchemes.RSA_PSS_PSS_SHA512.parent(),
-	SignatureSchemes.RSA_PSS_RSAE_SHA256.parent(),
-	SignatureSchemes.RSA_PSS_RSAE_SHA384.parent(),
-	SignatureSchemes.RSA_PSS_RSAE_SHA512.parent(),
-	SignatureSchemes.RSA_PKCS1_SHA256.parent(),
-	SignatureSchemes.RSA_PKCS1_SHA384.parent(),
-	SignatureSchemes.RSA_PKCS1_SHA512.parent(),
+	SignatureScheme.ECDSA_SECP256R1_SHA256,
+	SignatureScheme.ECDSA_SECP384R1_SHA384,
+	SignatureScheme.ECDSA_SECP521R1_SHA512,
+	SignatureScheme.ED25519,
+	SignatureScheme.ED448,
+	SignatureScheme.RSA_PSS_PSS_SHA256,
+	SignatureScheme.RSA_PSS_PSS_SHA384,
+	SignatureScheme.RSA_PSS_PSS_SHA512,
+	SignatureScheme.RSA_PSS_RSAE_SHA256,
+	SignatureScheme.RSA_PSS_RSAE_SHA384,
+	SignatureScheme.RSA_PSS_RSAE_SHA512,
+	SignatureScheme.RSA_PKCS1_SHA256,
+	SignatureScheme.RSA_PKCS1_SHA384,
+	SignatureScheme.RSA_PKCS1_SHA512,
 )
 
 class HashObject(ABC):
@@ -418,13 +418,13 @@ class _PycaHash(Hasher):
 def get_hash_alg(cipher_suite: CipherSuite) -> Hasher:
     """Given a CipherSuite, returns an object to do hashing.
     """
-    match cipher_suite.typ:
-        case (CipherSuites.TLS_AES_128_GCM_SHA256
-              | CipherSuites.TLS_CHACHA20_POLY1305_SHA256
-              | CipherSuites.TLS_AES_128_CCM_SHA256
-              | CipherSuites.TLS_AES_128_CCM_8_SHA256):
+    match cipher_suite:
+        case (CipherSuite.TLS_AES_128_GCM_SHA256
+              | CipherSuite.TLS_CHACHA20_POLY1305_SHA256
+              | CipherSuite.TLS_AES_128_CCM_SHA256
+              | CipherSuite.TLS_AES_128_CCM_8_SHA256):
             return _PycaHash(SHA256())
-        case CipherSuites.TLS_AES_256_GCM_SHA384:
+        case CipherSuite.TLS_AES_256_GCM_SHA384:
             return _PycaHash(SHA384())
     raise ValueError(f"no hash implementation for cipher suite {cipher_suite}")
 
@@ -485,25 +485,25 @@ def get_cipher_alg(cipher_suite: CipherSuite) -> AeadCipher:
     The returned object cipher will have the following:
     (All values are bytes, with sizes as specified in [] when relevant.)
     """
-    match cipher_suite.typ:
-        case CipherSuites.TLS_AES_128_GCM_SHA256:
+    match cipher_suite:
+        case CipherSuite.TLS_AES_128_GCM_SHA256:
             return _PycaAead(AESGCM, 16)
-        case CipherSuites.TLS_AES_256_GCM_SHA384:
+        case CipherSuite.TLS_AES_256_GCM_SHA384:
             return _PycaAead(AESGCM, 32)
-        case CipherSuites.TLS_CHACHA20_POLY1305_SHA256:
+        case CipherSuite.TLS_CHACHA20_POLY1305_SHA256:
             return _PycaAead(ChaCha20Poly1305, 32)
-        case CipherSuites.TLS_AES_128_CCM_SHA256:
+        case CipherSuite.TLS_AES_128_CCM_SHA256:
             return _PycaAead(AESCCM, 16)
-        case CipherSuites.TLS_AES_128_CCM_8_SHA256:
+        case CipherSuite.TLS_AES_128_CCM_8_SHA256:
             return _PycaAead(AESCCM, 16, tag_len=8)
     raise ValueError(f"no cipher implementation for cipher suite {cipher_suite}")
 
 
 DEFAULT_CIPHER_SUITES: tuple[CipherSuite, ...] = (
-    CipherSuites.TLS_AES_256_GCM_SHA384.parent(),
-    CipherSuites.TLS_CHACHA20_POLY1305_SHA256.parent(),
-    CipherSuites.TLS_AES_128_GCM_SHA256.parent(),
-    CipherSuites.LEGACY_TLS_EMPTY_RENEGOTIATION_INFO_SCSV.parent(),
+    CipherSuite.TLS_AES_256_GCM_SHA384,
+    CipherSuite.TLS_CHACHA20_POLY1305_SHA256,
+    CipherSuite.TLS_AES_128_GCM_SHA256,
+    CipherSuite.LEGACY_TLS_EMPTY_RENEGOTIATION_INFO_SCSV,
 )
 
 
@@ -542,15 +542,15 @@ def get_kem_alg(kem_id: HpkeKemId) -> KeyEncaps:
     """
     return _Pyhpke_Kem(pyhpke.KEMId(kem_id.value))
 
-DEFAULT_KEM: HpkeKemId = HpkeKemIds.DHKEM_X25519_HKDF_SHA256.parent()
+DEFAULT_KEM = HpkeKemId.DHKEM_X25519_HKDF_SHA256
 
 DEFAULT_HPKE_CSUITES: tuple[tuple[HpkeKdfId,HpkeAeadId],...] = (
-    (HpkeKdfIds.HKDF_SHA256.parent(), HpkeAeadIds.AES_256_GCM.parent()),
-    (HpkeKdfIds.HKDF_SHA256.parent(), HpkeAeadIds.CHACHA20_POLY1305.parent()),
+    (HpkeKdfId.HKDF_SHA256, HpkeAeadId.AES_256_GCM),
+    (HpkeKdfId.HKDF_SHA256, HpkeAeadId.CHACHA20_POLY1305),
 )
 
 DEFAULT_KEX_MODES: tuple[PskKeyExchangeMode,...] = (
-    PskKeyExchangeModes.PSK_DHE_KE.parent(),
+    PskKeyExchangeMode.PSK_DHE_KE,
 )
 
 @dataclass
@@ -674,9 +674,9 @@ def gen_ech_config(
         config = Draft24ECHConfig.create(
             key_config = (
                 config_id,
-                kem_id.value,
+                kem_id,
                 pubkey,
-                [(k.value, a.value) for k,a in cipher_suites],
+                cipher_suites,
             ),
             maximum_name_length = maximum_name_length,
             public_name = public_name,

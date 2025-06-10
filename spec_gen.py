@@ -323,7 +323,7 @@ class _NamedConst(GenSpec):
 
     @override
     def create_from(self, names: OneToOne[GenSpec,str]) -> Iterable[tuple[str,str]]:
-        return (('value', 'int'),)
+        return (('value', f'int|{names[self]}'),)
 
     @override
     def suggest(self, name: str, rank: float) -> bool:
@@ -337,8 +337,9 @@ class _NamedConst(GenSpec):
     def generate(self, dest: TextIO, names: OneToOne[GenSpec,str]) -> None:
         tname = get_name(self.enum_type, names)
         vname = names[self.vt]
+        sname = names[self]
         dest.write(dedent(f"""\
-            class {names[self]}(spec._NamedConstBase[{tname}]):
+            class {sname}(spec._NamedConstBase[{tname}]):
                 _T = {tname}
                 _V = {vname}
                 _BYTE_LENGTH = {vname}._BYTE_LENGTH
@@ -347,9 +348,11 @@ class _NamedConst(GenSpec):
             dest.write(f"    _alternate_values = {{{', '.join(f'{val}:{tname}.{name}' for val,name in self.alts)}}}\n")
         if self.default:
             dest.write(f"    _default_typ = {tname}.{self.default}\n")
+        for name,_ in self.enum_type.members:
+            dest.write(f"    {name}: {repr(sname)}\n")
         dest.write(indent(dedent(f"""
-            def __init__(self, value: int) -> None:
-                self._subclass_init(value)
+                def __init__(self, value: int) -> None:
+                    self._subclass_init(value)
             """), '    '))
 
     @override
@@ -888,7 +891,7 @@ class SourceGen:
     names: OneToOne[GenSpec,str]
     _written: set[GenSpec] = field(default_factory=set)
 
-    def __post_init__(self) -> None:
+    def preamble(self) -> None:
         self.dest.write(dedent('''
             # XXX AUTO-GENERATED - DO NOT EDIT! XXX
             from typing import Self, override, BinaryIO, ClassVar, Any
@@ -913,6 +916,17 @@ class SourceGen:
         for spec in specs:
             self.write(spec)
 
+    def epilogue(self) -> None:
+        ets = ', '.join(name for (typ,name) in self.names if isinstance(typ, _NamedConst))
+        self.dest.write(dedent(f"""
+            _enum_types: list[type[spec._NamedConstBase[Any]]] = [{ets}]
+            def _set_enum_constants() -> None:
+                for etype in _enum_types:
+                    for enum_val in etype._T:
+                        setattr(etype, enum_val.name, etype.create(enum_val.value))
+            _set_enum_constants()
+            """))
+
 
 def generate_specs(dest: TextIO, **kwargs: GenSpec) -> None:
     ns = Names()
@@ -921,4 +935,7 @@ def generate_specs(dest: TextIO, **kwargs: GenSpec) -> None:
         spec.suggest(name, FORCE_RANK)
         ns.register(spec)
 
-    SourceGen(dest, ns.assign()).write_all(ns.order())
+    sg = SourceGen(dest, ns.assign())
+    sg.preamble()
+    sg.write_all(ns.order())
+    sg.epilogue()

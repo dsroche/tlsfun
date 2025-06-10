@@ -305,8 +305,8 @@ class KeyCalc:
         return TicketInfo.create(
             ticket_id = ticket.ticket,
             secret    = self.ticket_secret(ticket.ticket_nonce),
-            csuite    = self.cipher_suite.value,
-            modes     = [m.value for m in modes],
+            csuite    = self.cipher_suite,
+            modes     = modes,
             mask      = ticket.ticket_age_add,
             lifetime  = ticket.ticket_lifetime,
             creation  = (round(time.time()) if creation is None else creation),
@@ -356,7 +356,7 @@ class ServerTicketer:
         expiration = current_time + lifetime
 
         ptext = ServerTicketPlaintext.create(
-            cipher_suite = csuite.value,
+            cipher_suite = csuite,
             expiration = round(expiration),
             psk = secret,
         )

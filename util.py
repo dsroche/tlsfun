@@ -1,6 +1,6 @@
 """Various small utility or helper stuff not TLS specific."""
 
-from collections.abc import Callable, Iterable, Hashable
+from collections.abc import Callable, Iterable, Hashable, Iterator
 from typing import Any, cast
 from dataclasses import dataclass, field
 import functools
@@ -83,6 +83,10 @@ class OneToOne[K1: Hashable, K2: Hashable]:
 
     def __contains__(self, key: K1) -> bool:
         return self.contains1(key)
+
+    def __iter__(self) -> Iterator[tuple[K1,K2]]:
+        return iter(self._forward.items())
+
 
 def b64enc(raw_bytes: bytes) -> str:
     return base64.b64encode(raw_bytes).decode('ascii')

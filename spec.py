@@ -530,16 +530,14 @@ class _NamedConstBaseBase[T: IntEnum](_Fixed, ABC):
     _V: type[_Integral]
     _alternate_values: dict[int,T] = {}
     _default_typ: T|None = None
-    _CREATE_FROM = (('value', int),)
 
     @classmethod
-    def create(cls, value: int) -> Self:
+    def create(cls, value: 'int|_NamedConstBase[T]') -> Self:
+        if not isinstance(value, int):
+            value = value.value
         obj = object.__new__(cls)
         obj._subclass_init(value)
         return obj
-
-    @abstractmethod
-    def uncreate(self) -> int: ...
 
     @abstractmethod
     def _subclass_init(self, value: int) -> None: ...
@@ -552,10 +550,6 @@ class _NamedConstBase[T: IntEnum](_NamedConstBaseBase[T]):
     @property
     def name(self) -> str:
         return self.typ.name
-
-    @override
-    def uncreate(self) -> int:
-        return self.value
 
     @override
     def _subclass_init(self, value: int) -> None:
@@ -572,17 +566,30 @@ class _NamedConstBase[T: IntEnum](_NamedConstBaseBase[T]):
                     raise ValueError(f"Value {value} invalid for {type(self).__name__}")
         _NamedConstBase.__init__(self, typ=typ, value=value)
 
+    def uncreate(self) -> int:
+        return self.value
+
+    @classmethod
+    def all(cls) -> Iterable[Self]:
+        for e in cls._T:
+            yield cls.create(e)
+        for v in cls._alternate_values:
+            yield cls.create(v)
+
     @override
     def jsonify(self) -> Json:
-        return self.value.jsonify()
+        return {'name': self.name, 'value': self.value.jsonify()}
 
     @override
     @classmethod
     def from_json(cls, obj: Json) -> Self:
-        if isinstance(obj, int):
-            return cls.create(obj)
-        else:
-            raise UnpackError(obj, f"NamedConst in Json should be int, got {obj}")
+        match obj:
+            case {'name': name, 'value': value, **rest}:
+                if isinstance(name, str) and isinstance(value, int) and not rest:
+                    result = cls.create(value)
+                    if result.name == name:
+                        return result
+        raise UnpackError(obj, f"Invalid json for {cls.__name__}: {obj}")
 
     @override
     def packed_size(self) -> int:

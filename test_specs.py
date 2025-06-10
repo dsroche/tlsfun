@@ -56,8 +56,8 @@ def test_error(cls: type[Spec], js: Json, rawhex: str) -> None:
         raise AssertionError(f'{cls}.unpack({rawhex}) should be ValueError')
 
 def positive_test_cases() -> Iterable[tuple[Spec, Json, str]]:
-    yield Days.Tuesday.parent(), 'Tuesday', '02'
-    yield Months.May.parent(), 'May', '0005'
+    yield Day.Tuesday, {'name':'Tuesday','value':2}, '02'
+    yield Month.May, {'name':'May','value':5}, '0005'
     yield Uint24(258), 258, '000102'
     yield Uint8(17), 17, '11'
     yield String('abcd'), 'abcd', '61626364'
@@ -70,7 +70,7 @@ def positive_test_cases() -> Iterable[tuple[Spec, Json, str]]:
     yield ShortShorts([Uint16(3),Uint16(4),Uint16(5)]), [3,4,5], '06000300040005'
     #yield B16S8((Uint8(10), Uint8(20))), [10,20], '00020a14'
     yield (BrassInstrument.create(valves=5, weight=40).parent(),
-           {'typ': 'Brass', 'data': {'valves': 5, 'weight': 40},},
+           {'selector': {'name': 'Brass', 'value': 1}, 'data': {'valves': 5, 'weight': 40},},
            '01050028')
 #    test_spec(Uint8, 33, 33, '21')
 #    test_spec(Uint16, 50, 50, '0032')
