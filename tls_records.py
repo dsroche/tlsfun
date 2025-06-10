@@ -11,9 +11,9 @@ import spec
 from spec import force_write, UnpackError, Fill, Raw, LimitReader
 from tls13_spec import (
     Record,
-    ContentType,
+    ContentType, ContentTypes,
     RecordHeader,
-    Version,
+    Version, Versions,
     InnerPlaintextBase,
     RecordEntry,
     Transcript,
@@ -24,7 +24,7 @@ from tls_keycalc import KeyCalc, KeyCalcMissing
 
 HOST_NAME_TYPE = 0 # for SNI extension
 CCS_PAYLOAD = b'\x01'
-DEFAULT_LEGACY_VERSION = Version.TLS_1_2
+DEFAULT_LEGACY_VERSION = Versions.TLS_1_2.parent()
 DEFAULT_LEGACY_COMPRESSION = [0]
 
 class PayloadProcessor(ABC):
@@ -64,8 +64,8 @@ class HandshakeBuffer(DataBuffer):
 
 def get_header(record: Record) -> RecordHeader:
     return RecordHeader.create(
-        typ = record.typ,
-        version = record.version,
+        typ = record.typ.value,
+        version = record.version.value,
         size = len(record.payload),
     )
 
@@ -91,8 +91,8 @@ class InnerPlaintext(InnerPlaintextBase):
 
     def to_record(self, version: Version) -> Record:
         return Record.create(
-            typ = self.typ,
-            version = version,
+            typ = self.typ.value,
+            version = version.value,
             payload = self.payload,
         )
 
@@ -163,7 +163,7 @@ class RecordReader:
 
         logger.info(f'Fetched a size-{len(raw)} record of type {record.typ}')
 
-        if record.typ == ContentType.APPLICATION_DATA and self._unwrapper is not None:
+        if record.typ.typ == ContentTypes.APPLICATION_DATA and self._unwrapper is not None:
             wrapped = True
             ipt = InnerPlaintext.unpack(
                 self._unwrapper.decrypt(
@@ -185,17 +185,17 @@ class RecordReader:
     def fetch(self) -> None:
         record = self.get_next_record()
 
-        match record.typ:
-            case ContentType.CHANGE_CIPHER_SPEC:
+        match record.typ.typ:
+            case ContentTypes.CHANGE_CIPHER_SPEC:
                 if record.payload != CCS_PAYLOAD:
                     raise TlsError(f"CCS payload should be {CCS_PAYLOAD.hex()} but got {record.payload.hex()}")
                 return # ignore these messages
-            case ContentType.HANDSHAKE:
+            case ContentTypes.HANDSHAKE:
                 self.hs_buffer.add(record.payload)
-            case ContentType.ALERT:
+            case ContentTypes.ALERT:
                 alert = Alert.unpack(record.payload)
                 raise TlsError(f"Received ALERT: {alert}")
-            case ContentType.APPLICATION_DATA:
+            case ContentTypes.APPLICATION_DATA:
                 self._app_data_buffer.add(record.payload)
             case _:
                 raise TlsError(f"Received unexpected record of type {record.typ}")
@@ -217,17 +217,17 @@ class RecordWriter:
         self.key_count += 1
 
     def send(self, record: Record, padding: int = 0) -> None:
-        if self.wrapper is not None and record.typ != ContentType.CHANGE_CIPHER_SPEC:
+        if self.wrapper is not None and record.typ.typ != ContentTypes.CHANGE_CIPHER_SPEC:
             if record.version != DEFAULT_LEGACY_VERSION:
                 raise ValueError(f"wrapped records should always have version {repr(DEFAULT_LEGACY_VERSION)}")
             ptext = InnerPlaintext.create(
                 payload = record.payload,
-                typ     = record.typ,
+                typ     = record.typ.value,
                 padding = padding,
             ).pack()
             header = RecordHeader.create(
-                typ     = ContentType.APPLICATION_DATA,
-                version = DEFAULT_LEGACY_VERSION,
+                typ     = ContentTypes.APPLICATION_DATA,
+                version = DEFAULT_LEGACY_VERSION.value,
                 size    = self.wrapper.cipher.ctext_size(len(ptext))
             ).pack()
             ctext = self.wrapper.encrypt(ptext, header)
@@ -293,8 +293,8 @@ class Connection:
         while buf:
             chunk = buf[:maxp]
             self._rwriter.send(Record.create(
-                typ = ContentType.APPLICATION_DATA,
-                version = DEFAULT_LEGACY_VERSION,
+                typ = ContentTypes.APPLICATION_DATA,
+                version = DEFAULT_LEGACY_VERSION.value,
                 payload = bytes(buf[:maxp])
             ))
             del buf[:maxp]

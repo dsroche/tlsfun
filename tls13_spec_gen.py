@@ -10,7 +10,7 @@ from spec import (
 )
 from spec_gen import (
     GenSpec,
-    EnumSpec,
+    NamedConst,
     NamedConst,
     Struct,
     Uint,
@@ -23,12 +23,7 @@ from spec_gen import (
 )
 
 specs: dict[str, GenSpec] = kwdict(
-    Junk = NamedConst(16, 'Y')(
-        X = 100,
-        Y = 200,
-        Z = (300, 400, 500),
-    ),
-    ClientState = EnumSpec(8)(
+    ClientState = NamedConst(8)(
         # rfc8446#appendix-A.1
         START         = 0,
         WAIT_SH       = 1,
@@ -41,7 +36,7 @@ specs: dict[str, GenSpec] = kwdict(
         CLOSED        = 8,
         ERROR         = 9,
     ),
-    ServerState = EnumSpec(8)(
+    ServerState = NamedConst(8)(
         # rfc8446#appendix-A.2
         START         = 0,
         RECVD_CH      = 1,
@@ -53,7 +48,7 @@ specs: dict[str, GenSpec] = kwdict(
         WAIT_FINISHED = 7,
         CONNECTED     = 8,
     ),
-    ContentType = EnumSpec(8)(
+    ContentType = NamedConst(8)(
         INVALID            = 0,
         CHANGE_CIPHER_SPEC = 20,
         ALERT              = 21,
@@ -61,7 +56,7 @@ specs: dict[str, GenSpec] = kwdict(
         APPLICATION_DATA   = 23,
         HEARTBEAT          = 24,
     ),
-    HandshakeType = EnumSpec(8)(
+    HandshakeType = NamedConst(8)(
         CLIENT_HELLO         = 1,
         SERVER_HELLO         = 2,
         NEW_SESSION_TICKET   = 4,
@@ -74,7 +69,7 @@ specs: dict[str, GenSpec] = kwdict(
         KEY_UPDATE           = 24,
         MESSAGE_HASH         = 254,
     ),
-    ExtensionType = EnumSpec(16, 'UNSUPPORTED')(
+    ExtensionType = NamedConst(16, 'UNSUPPORTED')(
         SERVER_NAME                            = 0,
         MAX_FRAGMENT_LENGTH                    = 1,
         STATUS_REQUEST                         = 5,
@@ -105,7 +100,7 @@ specs: dict[str, GenSpec] = kwdict(
         UNSUPPORTED                            = 2570,
         ENCRYPTED_CLIENT_HELLO                 = 65037,
     ),
-    SignatureScheme = EnumSpec(16)(
+    SignatureScheme = NamedConst(16)(
         RSA_PKCS1_SHA256       = 0x0401,
         RSA_PKCS1_SHA384       = 0x0501,
         RSA_PKCS1_SHA512       = 0x0601,
@@ -123,7 +118,7 @@ specs: dict[str, GenSpec] = kwdict(
         RSA_PKCS1_SHA1         = 0x0201,
         ECDSA_SHA1             = 0x0203,
     ),
-    NamedGroup = EnumSpec(16, 'UNSUPPORTED')(
+    NamedGroup = NamedConst(16, 'UNSUPPORTED')(
         SECP256R1   = 0x0017,
         SECP384R1   = 0x0018,
         SECP521R1   = 0x0019,
@@ -136,7 +131,7 @@ specs: dict[str, GenSpec] = kwdict(
         FFDHE8192   = 0x0104,
         UNSUPPORTED = 0xFFFF,
     ),
-    CipherSuite = EnumSpec(16, 'UNSUPPORTED')(
+    CipherSuite = NamedConst(16, 'UNSUPPORTED')(
         TLS_AES_128_GCM_SHA256                   = 0x1301,
         TLS_AES_256_GCM_SHA384                   = 0x1302,
         TLS_CHACHA20_POLY1305_SHA256             = 0x1303,
@@ -145,24 +140,24 @@ specs: dict[str, GenSpec] = kwdict(
         LEGACY_TLS_EMPTY_RENEGOTIATION_INFO_SCSV = 0x00ff,
         UNSUPPORTED                              = 0x4a4a,
     ),
-    PskKeyExchangeMode = EnumSpec(8)(
+    PskKeyExchangeMode = NamedConst(8)(
         PSK_KE     = 0,
         PSK_DHE_KE = 1,
     ),
-    CertificateType = EnumSpec(8)(
+    CertificateType = NamedConst(8)(
         X509         = 0,
         RawPublicKey = 2,
     ),
-    Version = EnumSpec(16)(
+    Version = NamedConst(16)(
         TLS_1_0 = 0x0301,
         TLS_1_2 = 0x0303,
         TLS_1_3 = 0x0304,
     ),
-    AlertLevel = EnumSpec(8)(
+    AlertLevel = NamedConst(8)(
         WARNING = 1,
         FATAL   = 2,
     ),
-    AlertDescription = EnumSpec(8)(
+    AlertDescription = NamedConst(8)(
         CLOSE_NOTIFY                        = 0,
         UNEXPECTED_MESSAGE                  = 10,
         BAD_RECORD_MAC                      = 20,
@@ -191,26 +186,26 @@ specs: dict[str, GenSpec] = kwdict(
         CERTIFICATE_REQUIRED                = 116,
         NO_APPLICATION_PROTOCOL             = 120,
     ),
-    ECHClientHelloType = EnumSpec(8)(
+    ECHClientHelloType = NamedConst(8)(
         OUTER = 0,
         INNER = 1,
     ),
-    ECHConfigExtensionType = EnumSpec(16, 'UNSUPPORTED')(
+    ECHConfigExtensionType = NamedConst(16, 'UNSUPPORTED')(
         UNSUPPORTED = 0xffff,
     ),
-    HpkeKemId = EnumSpec(16)(
+    HpkeKemId = NamedConst(16)(
         DHKEM_P256_HKDF_SHA256  = 0x0010,
         DHKEM_P384_HKDF_SHA384  = 0x0011,
         DHKEM_P521_HKDF_SHA512  = 0x0012,
         DHKEM_X25519_HKDF_SHA256 = 0x0020,
         DHKEM_X448_HKDF_SHA512   = 0x0021,
     ),
-    HpkeKdfId = EnumSpec(16)(
+    HpkeKdfId = NamedConst(16)(
         HKDF_SHA256 = 0x0001,
         HKDF_SHA384 = 0x0002,
         HKDF_SHA512 = 0x0003,
     ),
-    HpkeAeadId = EnumSpec(16)(
+    HpkeAeadId = NamedConst(16)(
         AES_128_GCM       = 0x0001,
         AES_256_GCM       = 0x0002,
         CHACHA20_POLY1305 = 0x0003,
@@ -274,7 +269,7 @@ specs: dict[str, GenSpec] = kwdict(
             ),
     ),
 
-    ECHConfigVersion = EnumSpec(16)(
+    ECHConfigVersion = NamedConst(16)(
         DRAFT_24 = 0xfe0d,
     ),
 
@@ -444,11 +439,11 @@ specs: dict[str, GenSpec] = kwdict(
 
     Happy = Wrap(Uint(32)),
 
-    Days = EnumSpec(8)(
+    Day = NamedConst(8)(
         Monday = 1,
         Tuesday = 2,
     ),
-    Months = EnumSpec(16)(
+    Month = NamedConst(16)(
         February = 2,
         May = 5,
     ),
@@ -470,7 +465,7 @@ specs: dict[str, GenSpec] = kwdict(
         legs = Uint(8),
         nums = Bounded(8, Sequence(Uint(16))),
     ),
-    InstrumentType = EnumSpec(8)(
+    InstrumentType = NamedConst(8)(
         Brass = 1,
         Woodwind = 2,
         Strings = 3,

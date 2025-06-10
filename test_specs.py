@@ -56,8 +56,8 @@ def test_error(cls: type[Spec], js: Json, rawhex: str) -> None:
         raise AssertionError(f'{cls}.unpack({rawhex}) should be ValueError')
 
 def positive_test_cases() -> Iterable[tuple[Spec, Json, str]]:
-    yield Days.Tuesday, 'Tuesday', '02'
-    yield Months.May, 'May', '0005'
+    yield Days.Tuesday.parent(), 'Tuesday', '02'
+    yield Months.May.parent(), 'May', '0005'
     yield Uint24(258), 258, '000102'
     yield Uint8(17), 17, '11'
     yield String('abcd'), 'abcd', '61626364'
@@ -80,8 +80,8 @@ def positive_test_cases() -> Iterable[tuple[Spec, Json, str]]:
 #    test_spec(String16, 'bb', 'bb', '00026262')
 
 def error_test_cases() -> Iterable[tuple[type[Spec], Json, str]]:
-    yield Days, 10, ''
-    yield Months, 1, '0100'
+    yield Day, 10, ''
+    yield Month, 1, '0100'
     yield Uint8, -3, 'ffff'
 
 def all_tests() -> None:

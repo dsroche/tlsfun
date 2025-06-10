@@ -278,97 +278,17 @@ class FixRaw(GenSpec):
             """))
 
 
-@flyweight
-@dataclass(frozen=True)
-class _SpecEnumX(GenSpec):
-    bit_length: int
-
-    @property
-    def _parent(self) -> _FixedX:
-        return _FixedX(self.bit_length)
-
-    def __post_init__(self) -> None:
-        self.suggest(f'Enum{self.bit_length}', 100)
-
-    @override
-    def generate(self, dest: TextIO, names: OneToOne[GenSpec,str]) -> None:
-        dest.write(dedent(f"""\
-            class {names[self]}({names[self._parent]}, spec._SpecEnum):
-                @override
-                def jsonify(self) -> Json:
-                    return self.name
-
-                @override
-                @classmethod
-                def from_json(cls, obj: Json) -> Self:
-                    if isinstance(obj, int):
-                        return cls(obj)
-                    elif isinstance(obj, str):
-                        return cls[obj]
-                    else:
-                        raise ValueError
-
-                @override
-                def pack(self) -> bytes:
-                    return self.to_bytes(self._BYTE_LENGTH)
-
-                @override
-                @classmethod
-                def unpack(cls, raw: bytes) -> Self:
-                    if len(raw) != cls._BYTE_LENGTH:
-                        raise ValueError
-                    return cls(int.from_bytes(raw))
-            """))
-
-    @override
-    def prereqs(self) -> Iterable[Nested]:
-        yield self._parent
-
-
-@dataclass(frozen=True)
-class _EnumSpec(GenSpec):
-    _parent: _SpecEnumX
-    _missing: str|None
-    _members: tuple[tuple[str, int], ...]
-
-    def __post_init__(self) -> None:
-        self.suggest('EnumSpec', 5)
-
-    @override
-    def generate(self, dest: TextIO, names: OneToOne[GenSpec,str]) -> None:
-        dest.write(f"class {names[self]}({names[self._parent]}):\n")
-        for (name, value) in self._members:
-            dest.write(f"    {name} = {value}\n")
-        if self._missing is not None:
-            dest.write(indent(dedent(f"""\
-                @classmethod
-                def _missing_(cls, value: Any) -> Self:
-                    logger.warn(f"WARNING: Unrecognized {{cls.__name__}} value {{value}}")
-                    return cls[{repr(self._missing)}]
-                """), '    '))
-
-    @override
-    def prereqs(self) -> Iterable[Nested]:
-        yield self._parent
-
-@dataclass
-class EnumSpec:
-    bit_length: int
-    missing: str|None = None
-
-    def __call__(self, **kwargs: int) -> _EnumSpec:
-        return _EnumSpec(
-            _parent = _SpecEnumX(self.bit_length),
-            _missing = self.missing,
-            _members = tuple(kwargs.items()),
-        )
-
 @dataclass(frozen=True)
 class _NamedConstEnum(GenSpec):
     members: tuple[tuple[str,int], ...]
+    parent: '_NamedConst|None' = field(init=False,hash=False,compare=False,default=None)
 
     def __post_init__(self) -> None:
         self.suggest('NamedConstEnum', 10)
+
+    def set_parent(self, parent: '_NamedConst') -> None:
+        assert self.parent is None, "shouldn't set parent twice"
+        object.__setattr__(self, 'parent', parent)
 
     @override
     def create_from(self, names: OneToOne[GenSpec,str]) -> Iterable[tuple[str,str]]:
@@ -376,9 +296,18 @@ class _NamedConstEnum(GenSpec):
 
     @override
     def generate(self, dest: TextIO, names: OneToOne['GenSpec',str]) -> None:
+        if self.parent is None:
+            raise ValueError("parent of enum was never set")
+        pname = names[self.parent]
         dest.write(f"class {names[self]}(enum.IntEnum):\n")
         for name,value in self.members:
             dest.write(f"    {name} = {value}\n")
+        dest.write(indent(dedent(f"""
+            def parent(self) -> {repr(pname)}:
+                return {pname}(value=self.value)
+            def __str__(self) -> str:
+                return f'{{type(self).__name__}}.{{self.name}}'
+            """), '    '))
 
 
 @dataclass(frozen=True)
@@ -389,6 +318,7 @@ class _NamedConst(GenSpec):
     alts: tuple[tuple[int, str],...]
 
     def __post_init__(self) -> None:
+        self.enum_type.set_parent(self)
         self.update_stub('NamedConst', 10)
 
     @override
@@ -408,9 +338,10 @@ class _NamedConst(GenSpec):
         tname = get_name(self.enum_type, names)
         vname = names[self.vt]
         dest.write(dedent(f"""\
-            class {names[self]}(spec._NamedConstBase[{tname}, {vname}]):
+            class {names[self]}(spec._NamedConstBase[{tname}]):
                 _T = {tname}
                 _V = {vname}
+                _BYTE_LENGTH = {vname}._BYTE_LENGTH
             """))
         if self.alts:
             dest.write(f"    _alternate_values = {{{', '.join(f'{val}:{tname}.{name}' for val,name in self.alts)}}}\n")
@@ -709,6 +640,15 @@ class _Struct(GenSpec):
 def Struct(**kwargs: Nested) -> _Struct:
     return _Struct(tuple(kwargs.items()))
 
+def _enum_type_name(select_type: Nested, names: OneToOne[GenSpec,str]) -> str:
+    match select_type:
+        case _NamedConst():
+            return names[select_type.enum_type]
+        case str():
+            return _enum_type_name(names.get2(select_type), names)
+        case _:
+            raise ValueError(f"can't find enum type name for {select_type}")
+
 @dataclass(frozen=True)
 class _SelecteeGeneric(GenSpec):
     count: int # used to ensure uniqueness
@@ -740,20 +680,21 @@ class _SelecteeGeneric(GenSpec):
     @override
     def generate(self, dest: TextIO, names: OneToOne[GenSpec,str]) -> None:
         sname = get_name(self.select_type, names)
+        ename = _enum_type_name(self.select_type, names)
         dname = get_name(self.data_type, names)
         screat = _ItemCreation(self.select_type, names)
         dcreat = _ItemCreation(self.data_type, names)
         dest.write(dedent(f"""\
-            class {names[self]}(spec._Selectee[{sname}, {dname}]):
+            class {names[self]}(spec._Selectee[{ename}, {dname}]):
                 _SELECT_TYPE = {sname}
                 _DATA_TYPE = {dname}
 
                 @classmethod
-                def create(cls, typ: {screat.item}, data: {dcreat.item}) -> Self:
-                    return cls({screat.create_line(sname,'typ')}, {dcreat.create_line(dname,'data')})
+                def create(cls, selector: {screat.item}, data: {dcreat.item}) -> Self:
+                    return cls(selector={screat.create_line(sname,'selector')}, data={dcreat.create_line(dname,'data')})
 
                 def uncreate(self) -> tuple[{screat.item}, {dcreat.item}]:
-                    return ({screat.to_pairs('self.typ')}, {dcreat.to_pairs('self.data')})
+                    return ({screat.to_pairs('self.selector')}, {dcreat.to_pairs('self.data')})
             """))
         self._gen_parent(dest, names)
 
@@ -785,15 +726,16 @@ class _SelecteeSpecific(_SelecteeGeneric):
     @override
     def generate(self, dest: TextIO, names: OneToOne[GenSpec,str]) -> None:
         sname = get_name(self.select_type, names)
+        ename = _enum_type_name(self.select_type, names)
         dname = get_name(self.data_type, names)
         assert self.parent is not None, "parent was never set for selectee"
         pname = names[self.parent]
         creat = _ItemCreation(self.data_type, names)
         dest.write(dedent(f"""\
-            class {names[self]}(spec._SpecificSelectee[{sname}, {dname}]):
+            class {names[self]}(spec._SpecificSelectee[{ename}, {dname}]):
                 _SELECT_TYPE = {sname}
                 _DATA_TYPE = {dname}
-                _SELECTOR = {sname}.{self.selection}
+                _SELECTOR = {ename}.{self.selection}
 
                 @classmethod
                 def create(cls{creat.args}) -> Self:
@@ -843,6 +785,7 @@ class _SelectActual(GenSpec):
     @override
     def generate(self, dest: TextIO, names: OneToOne[GenSpec,str]) -> None:
         sname = get_name(self.select_type, names)
+        ename = _enum_type_name(self.select_type, names)
         gname = 'None' if self.generic_type is None else names[self.generic_type]
         tname = self._tname(names)
         sel_types: list[_SelecteeGeneric] = [s for _,s in self.selectees]
@@ -851,10 +794,10 @@ class _SelectActual(GenSpec):
         dest.write(dedent(f"""
             {tname} = {' | '.join(names[s] for s in sel_types)}
 
-            class {names[self]}(spec._Select[{sname}]):
+            class {names[self]}(spec._Select[{ename}]):
                 _SELECT_TYPE = {sname}
                 _GENERIC_TYPE = {gname}
-                _SELECTEES = {{{', '.join(f'{sname}.{key}:{names[s]}' for key,s in self.selectees)}}}
+                _SELECTEES = {{{', '.join(f'{ename}.{key}:{names[s]}' for key,s in self.selectees)}}}
 
                 def __init__(self, value: {tname}) -> None:
                     super().__init__(value)

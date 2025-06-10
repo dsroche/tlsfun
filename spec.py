@@ -525,14 +525,9 @@ class _StructBase(Spec):
                 raise e.above(src.got, part) from e
         return cls(**accum)
 
-class _SpecEnum(_Fixed, IntEnum):
-    @override
-    def __str__(self) -> str:
-        return f'{type(self).__name__}.{self.name}'
-
-class _NamedConstBaseBase[T: IntEnum, V: _Integral](Spec, ABC):
+class _NamedConstBaseBase[T: IntEnum](_Fixed, ABC):
     _T: type[T]
-    _V: type[V]
+    _V: type[_Integral]
     _alternate_values: dict[int,T] = {}
     _default_typ: T|None = None
     _CREATE_FROM = (('value', int),)
@@ -544,16 +539,23 @@ class _NamedConstBaseBase[T: IntEnum, V: _Integral](Spec, ABC):
         return obj
 
     @abstractmethod
+    def uncreate(self) -> int: ...
+
+    @abstractmethod
     def _subclass_init(self, value: int) -> None: ...
 
 @dataclass(frozen=True)
-class _NamedConstBase[T: IntEnum, V: _Integral](_NamedConstBaseBase[T,V]):
+class _NamedConstBase[T: IntEnum](_NamedConstBaseBase[T]):
     typ: T
-    value: V
+    value: _Integral
 
     @property
     def name(self) -> str:
         return self.typ.name
+
+    @override
+    def uncreate(self) -> int:
+        return self.value
 
     @override
     def _subclass_init(self, value: int) -> None:
@@ -580,7 +582,7 @@ class _NamedConstBase[T: IntEnum, V: _Integral](_NamedConstBaseBase[T,V]):
         if isinstance(obj, int):
             return cls.create(obj)
         else:
-            raise UnpackError(obj, f"SpecEnum in Json should be int, got {obj}")
+            raise UnpackError(obj, f"NamedConst in Json should be int, got {obj}")
 
     @override
     def packed_size(self) -> int:
@@ -598,11 +600,6 @@ class _NamedConstBase[T: IntEnum, V: _Integral](_NamedConstBaseBase[T,V]):
     @classmethod
     def unpack(cls, raw: bytes) -> Self:
         return cls.create(cls._V.unpack(raw))
-
-    @override
-    @classmethod
-    def unpack_from(cls, src: LimitReader) -> Self:
-        return cls.create(cls._V.unpack_from(src))
 
     def __str__(self) -> str:
         return f'{type(self).__name__}<{self.name},{self.value}>'
@@ -656,115 +653,115 @@ class _Const[T: Spec](Spec):
             raise UnpackError(got, "expected const {pformat(raw)}, got {pformat(got)}")
         return cls()
 
-class _Selectee[S: _SpecEnum, T: Spec](Spec):
-    _SELECT_TYPE: type[S]
+class _SelecteeBase[S: IntEnum, T: Spec](Spec):
+    _SELECT_TYPE: type[_NamedConstBase[S]]
     _DATA_TYPE: type[T]
 
-    def __init__(self, typ: S, data: T) -> None:
-        self._typ: S = typ
-        self._data: T = data
+@dataclass(frozen=True)
+class _Selectee[S: IntEnum, T: Spec](_SelecteeBase[S,T]):
+    selector: _NamedConstBase[S]
+    data: T
 
     @property
     def typ(self) -> S:
-        return self._typ
-
-    @property
-    def data(self) -> T:
-        return self._data
+        return self.selector.typ
 
     @override
     def jsonify(self) -> Json:
-        return {'typ': self.typ.jsonify(), 'data': self.data.jsonify()}
+        return {'selector': self.selector.jsonify(), 'data': self.data.jsonify()}
 
     @classmethod
-    def _check_typ(cls, typ: S) -> S:
-        return typ
+    def _check_selector(cls, sel: _NamedConstBase[S]) -> _NamedConstBase[S]:
+        if isinstance(sel, cls._SELECT_TYPE):
+            return sel
+        raise ValueError
 
     @override
     @classmethod
     def from_json(cls, obj: Json) -> Self:
         match obj:
-            case {'typ': jtyp, 'data': data, **rest}:
+            case {'selector': jsel, 'data': data, **rest}:
                 if rest:
-                    raise ValueError
-                typ = cls._check_typ(cls._SELECT_TYPE.from_json(jtyp))
-                return cls(typ=typ, data=cls._DATA_TYPE.from_json(data))
+                    raise UnpackError(obj, f"Got extra fields in selector from_json: {rest}")
+                sel = cls._check_selector(cls._SELECT_TYPE.from_json(jsel))
+                return cls(selector=sel, data=cls._DATA_TYPE.from_json(data))
         raise ValueError
 
     @override
     def packed_size(self) -> int:
-        return self.typ.packed_size() + self.data.packed_size()
+        return self.selector.packed_size() + self.data.packed_size()
 
     @override
     def pack(self) -> bytes:
-        return self.typ.pack() + self.data.pack()
+        return self.selector.pack() + self.data.pack()
 
     @override
     def pack_to(self, dest: BinaryIO) -> int:
-        return self.typ.pack_to(dest) + self.data.pack_to(dest)
+        return self.selector.pack_to(dest) + self.data.pack_to(dest)
 
     @override
     @classmethod
     def unpack(cls, raw: bytes) -> Self:
-        tlen = cls._SELECT_TYPE._BYTE_LENGTH
-        if len(raw) < tlen:
+        slen = cls._SELECT_TYPE._BYTE_LENGTH
+        if len(raw) < slen:
             raise ValueError
-        typ = cls._check_typ(cls._SELECT_TYPE.unpack(raw[:tlen]))
+        sel = cls._check_selector(cls._SELECT_TYPE.unpack(raw[:slen]))
         try:
-            return cls(typ=typ, data=cls._DATA_TYPE.unpack(raw[tlen:]))
+            return cls(selector=sel, data=cls._DATA_TYPE.unpack(raw[slen:]))
         except UnpackError as e:
-            raise e.above(raw, {'typ': str(typ), 'data': e.partial}) from e
+            raise e.above(raw, {'selector': str(sel), 'data': e.partial}) from e
 
     @override
     @classmethod
     def unpack_from(cls, src: LimitReader) -> Self:
-        typ = cls._SELECT_TYPE.unpack_from(src)
-        return cls.unpack_from_data(typ, src)
+        sel = cls._SELECT_TYPE.unpack_from(src)
+        return cls.unpack_from_data(sel, src)
 
     @classmethod
-    def unpack_from_data(cls, typ: S, src: LimitReader) -> Self:
-        typ = cls._check_typ(typ)
+    def unpack_from_data(cls, sel: _NamedConstBase[S], src: LimitReader) -> Self:
+        sel = cls._check_selector(sel)
         try:
             data = cls._DATA_TYPE.unpack_from(src)
         except UnpackError as e:
-            raise e.above(src.got, {'typ': typ, 'data': e.partial}) from e
-        return cls(typ=typ, data=data)
+            raise e.above(src.got, {'selector': str(sel), 'data': e.partial}) from e
+        return cls(selector=sel, data=data)
 
-class _SpecificSelectee[S: _SpecEnum, T: Spec](_Selectee[S, T]):
+class _SpecificSelectee[S: IntEnum, T: Spec](_Selectee[S, T]):
     _SELECTOR: S
 
-    def __init__(self, typ: S|None = None, data: T|None = None) -> None:
+    def __init__(self, selector: _NamedConstBase[S]|None = None, data: T|None = None) -> None:
         assert data is not None
-        super().__init__(self._SELECTOR, data)
-        if typ is not None and typ != self._SELECTOR:
+        if selector is not None and selector.typ != self._SELECTOR:
             raise ValueError
+        super().__init__(selector = self._SELECT_TYPE.create(self._SELECTOR), data=data)
 
     @override
     @classmethod
-    def _check_typ(cls, typ: S) -> S:
-        if typ == cls._SELECTOR:
-            return typ
+    def _check_selector(cls, selector: _NamedConstBase[S]) -> _NamedConstBase[S]:
+        if selector.typ == cls._SELECTOR:
+            return selector
         raise ValueError
 
-class _Select[S: _SpecEnum](Spec):
-    _SELECT_TYPE: type[S]
+class _SelectBase[S: IntEnum](Spec):
+    _SELECT_TYPE: type[_NamedConstBase[S]]
     _GENERIC_TYPE: type[_Selectee[S,Spec]] | None
     _SELECTEES: dict[S, type[_Selectee[S,Spec]]]
 
-    def __init__(self, value: _Selectee[S,Spec]) -> None:
-        self._value: _Selectee[S,Spec] = value
+@dataclass(frozen=True)
+class _Select[S: IntEnum](_SelectBase[S]):
+    value: _Selectee[S,Spec]
 
     @property
     def typ(self) -> S:
-        return self._value.typ
+        return self.value.typ
 
     @property
     def data(self) -> Spec:
-        return self._value.data
+        return self.value.data
 
     @override
     def jsonify(self) -> Json:
-        return self._value.jsonify()
+        return self.value.jsonify()
 
     @classmethod
     def _get_value_cls(cls, selector: S) -> type[_Selectee[S,Spec]]:
@@ -780,23 +777,23 @@ class _Select[S: _SpecEnum](Spec):
     @classmethod
     def from_json(cls, obj: Json) -> Self:
         match obj:
-            case {'typ': typ}:
-                selector = cls._SELECT_TYPE.from_json(typ)
-                value_cls = cls._get_value_cls(selector)
-                return cls(value_cls.from_json(obj))
+            case {'selector': jsel}:
+                selector = cls._SELECT_TYPE.from_json(jsel)
+                value_cls = cls._get_value_cls(selector.typ)
+                return cls(value=value_cls.from_json(obj))
         raise ValueError
 
     @override
     def packed_size(self) -> int:
-        return self._value.packed_size()
+        return self.value.packed_size()
 
     @override
     def pack(self) -> bytes:
-        return self._value.pack()
+        return self.value.pack()
 
     @override
     def pack_to(self, dest: BinaryIO) -> int:
-        return self._value.pack_to(dest)
+        return self.value.pack_to(dest)
 
     @override
     @classmethod
@@ -805,17 +802,17 @@ class _Select[S: _SpecEnum](Spec):
         if len(raw) < slen:
             raise ValueError
         selector = cls._SELECT_TYPE.unpack(raw[:slen])
-        value_cls = cls._get_value_cls(selector)
+        value_cls = cls._get_value_cls(selector.typ)
         try:
             return cls(value_cls.unpack(raw))
         except UnpackError as e:
-            raise e.above(raw, {'typ': str(selector), 'data': e.partial}) from e
+            raise e.above(raw, {'selector': str(selector), 'data': e.partial}) from e
 
     @override
     @classmethod
     def unpack_from(cls, src: LimitReader) -> Self:
         selector = cls._SELECT_TYPE.unpack_from(src)
         try:
-            return cls(cls._get_value_cls(selector).unpack_from_data(selector, src))
+            return cls(cls._get_value_cls(selector.typ).unpack_from_data(selector, src))
         except UnpackError as e:
-            raise e.above(src.got, {'typ': str(selector), 'data': e.partial}) from e
+            raise e.above(src.got, {'selector': str(selector), 'data': e.partial}) from e

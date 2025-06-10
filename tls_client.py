@@ -13,13 +13,13 @@ from spec import UnpackError
 from tls_common import *
 from tls13_spec import (
     Handshake,
-    ClientState,
+    ClientStates,
     HandshakeType,
     Record,
-    ContentType,
-    PskKeyExchangeMode,
-    ExtensionType,
-    Version,
+    ContentType, ContentTypes,
+    PskKeyExchangeMode, PskKeyExchangeModes,
+    ExtensionTypes,
+    Version, Versions,
     ClientExtension,
     ECHClientHelloType,
     HpkeKdfId,
@@ -138,46 +138,46 @@ def build_client_hello(
 
     # indicates all point formats are accepted (legacy)
     extensions.append(GenericClientExtension.create(
-        typ = ExtensionType.LEGACY_EC_POINT_FORMATS,
+        selector = ExtensionTypes.LEGACY_EC_POINT_FORMATS,
         data = bytes.fromhex('03000102'),
     ))
 
     # which groups supported for key exchange
-    extensions.append(SupportedGroupsClientExtension.create(kex_groups))
+    extensions.append(SupportedGroupsClientExtension.create(g.value for g in kex_groups))
 
     # more backwards compatibility empty info,
     # probably not necessary but who knows
     extensions.append(GenericClientExtension.create(
-        typ = ExtensionType.LEGACY_SESSION_TICKET,
+        selector = ExtensionTypes.LEGACY_SESSION_TICKET,
         data = b'',
     ))
     extensions.append(GenericClientExtension.create(
-        typ = ExtensionType.LEGACY_ENCRYPT_THEN_MAC,
+        selector = ExtensionTypes.LEGACY_ENCRYPT_THEN_MAC,
         data = b'',
     ))
     extensions.append(GenericClientExtension.create(
-        typ = ExtensionType.LEGACY_EXTENDED_MASTER_SECRET,
+        selector = ExtensionTypes.LEGACY_EXTENDED_MASTER_SECRET,
         data = b'',
     ))
 
     # which signature algorithms allowed for CertificateVerify message
-    extensions.append(SignatureAlgorithmsClientExtension.create(sig_algs))
+    extensions.append(SignatureAlgorithmsClientExtension.create(a.value for a in sig_algs))
 
     # indicate only TLS 1.3 is supported
-    extensions.append(SupportedVersionsClientExtension.create([Version.TLS_1_3]))
+    extensions.append(SupportedVersionsClientExtension.create([Versions.TLS_1_3]))
 
     # indicate whether DHE must still be done on resumption with a ticket
-    extensions.append(PskKeyExchangeModesClientExtension.create(psk_modes))
+    extensions.append(PskKeyExchangeModesClientExtension.create(m.value for m in psk_modes))
 
     if shares:
         # send the DHE public key
-        extensions.append(KeyShareClientExtension.create(shares))
+        extensions.append(KeyShareClientExtension.create((g.value, b) for g,b in shares))
 
     # add GREASE ECH if requested
     if grease_ech:
         extensions.append(EncryptedClientHelloClientExtension.create(
             variant = OuterECHClientHello.create(
-                cipher_suite = DEFAULT_HPKE_CSUITES[0],
+                cipher_suite = (DEFAULT_HPKE_CSUITES[0][0].value, DEFAULT_HPKE_CSUITES[0][1].value),
                 config_id = rgen.randrange(2**8),
                 enc = rgen.randbytes(32),
                 payload = rgen.randbytes(239),
@@ -186,10 +186,10 @@ def build_client_hello(
 
     # calculate client hello handshake message
     ch = ClientHelloHandshake.create(
-        legacy_version     = DEFAULT_LEGACY_VERSION,
+        legacy_version     = DEFAULT_LEGACY_VERSION.value,
         client_random      = rgen.randbytes(32),
         session_id         = rgen.randbytes(32),
-        ciphers            = ciphers,
+        ciphers            = (c.value for c in ciphers),
         legacy_compression = DEFAULT_LEGACY_COMPRESSION,
         extensions         = extensions,
     )
@@ -206,11 +206,11 @@ def build_client_hello(
 @dataclass
 class ClientHandshake(AbstractHandshake, PayloadProcessor):
     chello         : ClientHelloHandshake
-    state          : ClientState                  = ClientState.START
+    state          : ClientStates                 = ClientStates.START
     psk            : bytes|None                   = None
     sni            : str|None                     = None
     kexes          : dict[NamedGroup, bytes]      = field(default_factory=dict)
-    psk_modes      : Iterable[PskKeyExchangeMode] = tuple(PskKeyExchangeMode)
+    psk_modes      : Iterable[PskKeyExchangeMode] = (m.parent() for m in PskKeyExchangeModes)
     hs_trans       : HandshakeTranscript          = field(default_factory=HandshakeTranscript)
     key_calc       : KeyCalc                      = field(init=False)
     tickets        : list[TicketInfo]             = field(default_factory=list)
@@ -228,7 +228,7 @@ class ClientHandshake(AbstractHandshake, PayloadProcessor):
         sni: str|None = None
         kexes: dict[NamedGroup, bytes] = {}
 
-        psk_modes = tuple(PskKeyExchangeMode) # allow all modes if not specified
+        psk_modes = tuple(mode.parent() for mode in PskKeyExchangeModes) # allow all modes if not specified
 
         for ext in ch.data.extensions.uncreate():
             match ext:
@@ -239,15 +239,17 @@ class ClientHandshake(AbstractHandshake, PayloadProcessor):
                         pass
                 case KeyShareClientExtension():
                     for (group, _), private in zip(ext.uncreate(), secrets.kex_sks):
-                        kexes[group] = private
+                        kexes[NamedGroup.create(group)] = private
                 case PskKeyExchangeModesClientExtension():
-                    psk_modes = tuple(PskKeyExchangeMode(x) for x in ext.data)
+                    psk_modes = tuple(ext.data)
                     need_kex_mode = False
                 case PreSharedKeyClientExtension():
                     assert need_psk
                     need_psk = False
-                case GenericClientExtension(typ=ExtensionType.EARLY_DATA):
-                    raise TlsTODO('sending 0-RTT early data not supported yet')
+                case GenericClientExtension():
+                    match ext.typ:
+                        case ExtensionTypes.EARLY_DATA:
+                            raise TlsTODO("no support for 0RTT early data yet")
 
         assert not need_kex_mode and not need_psk, "needed psk and psk exchange mode extensions in client hello but didn't get them"
 
@@ -262,26 +264,26 @@ class ClientHandshake(AbstractHandshake, PayloadProcessor):
     @override
     @property
     def started(self) -> bool:
-        return self.state != ClientState.START
+        return self.state != ClientStates.START
 
     @override
     @property
     def connected(self) -> bool:
-        return self.state == ClientState.CONNECTED
+        return self.state == ClientStates.CONNECTED
 
     @override
     @property
     def can_send(self) -> bool:
-        return self.state == ClientState.CONNECTED
+        return self.state == ClientStates.CONNECTED
 
     @override
     @property
     def can_recv(self) -> bool:
-        return self.state == ClientState.CONNECTED
+        return self.state == ClientStates.CONNECTED
 
     @override
     def begin(self, rreader: RecordReader, rwriter: RecordWriter) -> None:
-        assert self.state == ClientState.START
+        assert self.state == ClientStates.START
         self._rreader = rreader
         self._rreader.hs_buffer = HandshakeBuffer(owner=self)
         self._rwriter = rwriter
@@ -291,16 +293,16 @@ class ClientHandshake(AbstractHandshake, PayloadProcessor):
         logger.info(f"sending hs message {msg.typ} to server")
         raw = msg.pack()
         self._rwriter.send(Record.create(
-            typ     = ContentType.HANDSHAKE,
-            version = vers,
+            typ     = ContentTypes.HANDSHAKE.value,
+            version = vers.value,
             payload = raw,
         ))
         self.hs_trans.add(hs=msg, from_client=True)
 
     def send_hello(self) -> None:
-        assert self.state == ClientState.START
-        self._send_hs_msg(self.chello, Version.TLS_1_0)
-        self.state = ClientState.WAIT_SH
+        assert self.state == ClientStates.START
+        self._send_hs_msg(self.chello, Versions.TLS_1_0.parent())
+        self.state = ClientStates.WAIT_SH
 
     @override
     def process_hs_payload(self, raw: bytes) -> None:
@@ -312,17 +314,17 @@ class ClientHandshake(AbstractHandshake, PayloadProcessor):
         logger.info(f"Received handshake message {msg.typ} with length {len(raw)}")
 
         match (self.state, msg.variant):
-            case (ClientState.WAIT_SH, ServerHelloHandshake() as shello):
+            case (ClientStates.WAIT_SH, ServerHelloHandshake() as shello):
                 self._process_server_hello(shello)
-            case (ClientState.WAIT_EE, EncryptedExtensionsHandshake() as ee):
+            case (ClientStates.WAIT_EE, EncryptedExtensionsHandshake() as ee):
                 self._process_ee(ee)
-            case ((ClientState.WAIT_CERT_CR | ClientState.WAIT_CERT), CertificateHandshake() as cert):
+            case ((ClientStates.WAIT_CERT_CR | ClientStates.WAIT_CERT), CertificateHandshake() as cert):
                 self._process_cert(cert)
-            case (ClientState.WAIT_CV, CertificateVerifyHandshake() as cv):
+            case (ClientStates.WAIT_CV, CertificateVerifyHandshake() as cv):
                 self._process_cv(cv)
-            case (ClientState.WAIT_FINISHED, FinishedHandshake() as fin):
+            case (ClientStates.WAIT_FINISHED, FinishedHandshake() as fin):
                 self._process_finished(fin)
-            case (ClientState.CONNECTED, NewSessionTicketHandshake() as nst):
+            case (ClientStates.CONNECTED, NewSessionTicketHandshake() as nst):
                 self._process_ticket(nst)
             case _:
                 raise TlsError(f"Unexpected {msg.typ} in state {self.state}")
@@ -348,7 +350,7 @@ class ClientHandshake(AbstractHandshake, PayloadProcessor):
                         raise TlsError(f"no implementation for kex group {group}")
                     kex_secret = kex.exchange(private, ext.data.pubkey)
                 case SupportedVersionsServerExtension():
-                    assert Version.TLS_1_3 in ext.data
+                    assert any(v.typ == Versions.TLS_1_3 for v in ext.data)
                 case PreSharedKeyServerExtension():
                     if ext.data != 0:
                         raise TlsError(f'unexpected index in PRE_SHARED_KEY: {ext.data}')
@@ -358,10 +360,10 @@ class ClientHandshake(AbstractHandshake, PayloadProcessor):
 
         match ((kex_secret is not None), (self.psk is not None), got_psk):
             case (True, True, True):
-                if PskKeyExchangeMode.PSK_DHE_KE not in self.psk_modes:
+                if not any(m.typ == PskKeyExchangeModes.PSK_DHE_KE for m in self.psk_modes):
                     raise TlsError("server wants PSK_DHE_KE but client didn't ask for it")
             case (False, True, True):
-                if PskKeyExchangeMode.PSK_KE not in self.psk_modes:
+                if not any(m.typ == PskKeyExchangeModes.PSK_KE for m in self.psk_modes):
                     raise TlsError("server wants PSK_KE but client didn't ask for it")
             case (True, False, False):
                 pass
@@ -382,7 +384,7 @@ class ClientHandshake(AbstractHandshake, PayloadProcessor):
         self._rreader.rekey(self._cipher, self._hash_alg, self.key_calc.server_handshake_traffic_secret)
 
         logger.info(f"Finished processing server hello")
-        self.state = ClientState.WAIT_EE
+        self.state = ClientStates.WAIT_EE
 
     def _process_ee(self, ee: EncryptedExtensionsHandshake) -> None:
         for ext in ee.data.data:
@@ -401,9 +403,9 @@ class ClientHandshake(AbstractHandshake, PayloadProcessor):
 
         logger.info(f"Finished processing server encrypted extensions")
         if self.psk is None:
-            self.state = ClientState.WAIT_CERT_CR
+            self.state = ClientStates.WAIT_CERT_CR
         else:
-            self.state = ClientState.WAIT_FINISHED
+            self.state = ClientStates.WAIT_FINISHED
 
     def _process_cert(self, cert: CertificateHandshake) -> None:
         if cert.data.certificate_request_context:
@@ -417,7 +419,7 @@ class ClientHandshake(AbstractHandshake, PayloadProcessor):
             f" with lengths {[len(x) for x in self._cert_chain]}")
         self._cert_pubkey = extract_x509_pubkey(self._cert_chain[0])
 
-        self.state = ClientState.WAIT_CV
+        self.state = ClientStates.WAIT_CV
 
     def _process_cv(self, cv: CertificateVerifyHandshake) -> None:
         logger.info(f"Received a length-{len(cv.data.signature)} sig of type {cv.data.algorithm}")
@@ -436,7 +438,7 @@ class ClientHandshake(AbstractHandshake, PayloadProcessor):
         else:
             raise TlsError("signature check failed in CERTIFICATE_VERIFY")
 
-        self.state = ClientState.WAIT_FINISHED
+        self.state = ClientStates.WAIT_FINISHED
 
     def _process_finished(self, sf: FinishedHandshake) -> None:
         if sf.data != self.key_calc.server_finished_verify:
@@ -445,8 +447,8 @@ class ClientHandshake(AbstractHandshake, PayloadProcessor):
 
         logger.info(f"Sending change cipher spec to server")
         self._rwriter.send(Record.create(
-            typ     = ContentType.CHANGE_CIPHER_SPEC,
-            version = DEFAULT_LEGACY_VERSION,
+            typ     = ContentTypes.CHANGE_CIPHER_SPEC,
+            version = DEFAULT_LEGACY_VERSION.value,
             payload = CCS_PAYLOAD,
         ))
 
@@ -462,7 +464,7 @@ class ClientHandshake(AbstractHandshake, PayloadProcessor):
         self._rwriter.rekey(self._cipher, self._hash_alg,
                             self.key_calc.client_application_traffic_secret)
 
-        self.state = ClientState.CONNECTED
+        self.state = ClientStates.CONNECTED
 
     def _process_ticket(self, nst: NewSessionTicketHandshake) -> None:
         self.tickets.append(self.key_calc.ticket_info(nst.data, modes=self.psk_modes))

@@ -17,8 +17,8 @@ from spec import UnpackError
 from tls_common import *
 from tls13_spec import (
     Handshake,
-    ExtensionType,
-    HandshakeType,
+    ExtensionTypes,
+    HandshakeTypes,
     PskBinders,
     CipherSuite,
     PskKeyExchangeMode,
@@ -50,7 +50,7 @@ class TicketInfo(TicketInfoStruct):
     def add_psk_ext(self, chello: ClientHelloHandshake, send_time: float|None = None) -> ClientHelloHandshake:
         """Returns a new ClientHello Hansshake object with the PSK extension filled in."""
         extensions: list[ClientExtensionVariant] = list(chello.data.extensions.uncreate())
-        if any(ext.typ == ExtensionType.PRE_SHARED_KEY for ext in extensions):
+        if any(ext.typ == ExtensionTypes.PRE_SHARED_KEY for ext in extensions):
             raise ValueError(f"client hello should not contain PSK extension yet")
 
         # compute values for dummy psk extension
@@ -98,7 +98,7 @@ class TicketInfo(TicketInfoStruct):
 
         return calc_binder_key(chello, index, self.secret, self.csuite, prefix)
 
-HSTLookup = tuple[HandshakeType,bool] | HandshakeType | int
+HSTLookup = tuple[HandshakeTypes,bool] | HandshakeTypes | int
 
 class HandshakeTranscript:
     def __init__(self) -> None:
@@ -116,7 +116,7 @@ class HandshakeTranscript:
         self._hash_alg = ha
         self._running = self._hash_alg.hasher()
         self._history: list[bytes] = [self._running.digest()]
-        self._lookup: dict[tuple[HandshakeType, bool], bytes] = {}
+        self._lookup: dict[tuple[HandshakeTypes, bool], bytes] = {}
         for hs, from_client in self._backlog:
             self.add(hs, from_client)
         del self._backlog
@@ -137,7 +137,7 @@ class HandshakeTranscript:
         match key:
             case tuple():
                 return self._lookup[key]
-            case HandshakeType():
+            case HandshakeTypes():
                 return self._lookup[key, False]
             case int():
                 return self._history[key]
@@ -226,7 +226,7 @@ class KeyCalc:
             b'\x20'*64,
             b'TLS 1.3, server CertificateVerify',
             b'\x00',
-            self.hs_trans[HandshakeType.CERTIFICATE, False],
+            self.hs_trans[HandshakeTypes.CERTIFICATE, False],
         ])
 
     @cached_property
@@ -234,16 +234,16 @@ class KeyCalc:
         base_key = self.server_handshake_traffic_secret
         if self.psk is self.zero:
             thash = self.hs_trans[
-                HandshakeType.CERTIFICATE_VERIFY, False]
+                HandshakeTypes.CERTIFICATE_VERIFY, False]
         else:
             thash = self.hs_trans[
-                HandshakeType.ENCRYPTED_EXTENSIONS, False]
+                HandshakeTypes.ENCRYPTED_EXTENSIONS, False]
         return self.get_verify_data(base_key, thash)
 
     @cached_property
     def client_finished_verify(self) -> bytes:
         base_key = self.client_handshake_traffic_secret
-        thash = self.hs_trans[HandshakeType.FINISHED, False]
+        thash = self.hs_trans[HandshakeTypes.FINISHED, False]
         return self.get_verify_data(base_key, thash)
 
     def _derive(self, secret: bytes, text: bytes, lookup: HSTLookup) -> bytes:
@@ -260,7 +260,7 @@ class KeyCalc:
 
     @cached_property
     def client_early_traffic_secret(self) -> bytes:
-        return self._derive(self.early_secret, b'c e traffic', HandshakeType.CLIENT_HELLO)
+        return self._derive(self.early_secret, b'c e traffic', HandshakeTypes.CLIENT_HELLO)
 
     @cached_property
     def derived0(self) -> bytes:
@@ -268,11 +268,11 @@ class KeyCalc:
 
     @cached_property
     def client_handshake_traffic_secret(self) -> bytes:
-        return self._derive(self.handshake_secret, b'c hs traffic', HandshakeType.SERVER_HELLO)
+        return self._derive(self.handshake_secret, b'c hs traffic', HandshakeTypes.SERVER_HELLO)
 
     @cached_property
     def server_handshake_traffic_secret(self) -> bytes:
-        return self._derive(self.handshake_secret, b's hs traffic', HandshakeType.SERVER_HELLO)
+        return self._derive(self.handshake_secret, b's hs traffic', HandshakeTypes.SERVER_HELLO)
 
     @cached_property
     def derived1(self) -> bytes:
@@ -280,15 +280,15 @@ class KeyCalc:
 
     @cached_property
     def client_application_traffic_secret(self) -> bytes:
-        return self._derive(self.master_secret, b'c ap traffic', (HandshakeType.FINISHED, False))
+        return self._derive(self.master_secret, b'c ap traffic', (HandshakeTypes.FINISHED, False))
 
     @cached_property
     def server_application_traffic_secret(self) -> bytes:
-        return self._derive(self.master_secret, b's ap traffic', (HandshakeType.FINISHED, False))
+        return self._derive(self.master_secret, b's ap traffic', (HandshakeTypes.FINISHED, False))
 
     @cached_property
     def resumption_master_secret(self) -> bytes:
-        return self._derive(self.master_secret, b'res master', (HandshakeType.FINISHED, True))
+        return self._derive(self.master_secret, b'res master', (HandshakeTypes.FINISHED, True))
 
     def ticket_secret(self, ticket_nonce: bytes) -> bytes:
         # rfc8446#section-4.6.1
@@ -305,8 +305,8 @@ class KeyCalc:
         return TicketInfo.create(
             ticket_id = ticket.ticket,
             secret    = self.ticket_secret(ticket.ticket_nonce),
-            csuite    = self.cipher_suite,
-            modes     = modes,
+            csuite    = self.cipher_suite.value,
+            modes     = [m.value for m in modes],
             mask      = ticket.ticket_age_add,
             lifetime  = ticket.ticket_lifetime,
             creation  = (round(time.time()) if creation is None else creation),
@@ -356,7 +356,7 @@ class ServerTicketer:
         expiration = current_time + lifetime
 
         ptext = ServerTicketPlaintext.create(
-            cipher_suite = csuite,
+            cipher_suite = csuite.value,
             expiration = round(expiration),
             psk = secret,
         )
