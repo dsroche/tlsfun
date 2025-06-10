@@ -78,9 +78,9 @@ from tls_records import (
     HOST_NAME_TYPE,
     DEFAULT_LEGACY_VERSION,
     DEFAULT_LEGACY_COMPRESSION,
-    CCS_PAYLOAD,
     AbstractHandshake,
     PayloadProcessor,
+    CCS_MESSAGE,
 )
 from tls_keycalc import KeyCalc, HandshakeTranscript, TicketInfo
 
@@ -381,7 +381,7 @@ class ClientHandshake(AbstractHandshake, PayloadProcessor):
         # set up handshake keys
         self.key_calc.set_psk(self.psk)
         self.key_calc.set_kex_secret(kex_secret)
-        self._rreader.rekey(self._cipher, self._hash_alg, self.key_calc.server_handshake_traffic_secret)
+        self._rreader.rekey(self._cipher_suite, self.key_calc.server_handshake_traffic_secret)
 
         logger.info(f"Finished processing server hello")
         self.state = ClientStates.WAIT_EE
@@ -397,7 +397,7 @@ class ClientHandshake(AbstractHandshake, PayloadProcessor):
                     pass
                 case EncryptedClientHelloServerExtension() as eche:
                     logger.info(f'received {len(eche.data.data)} ECH configs in server EE')
-                    self.ech_configs.extend(x.variant for x in eche.data.data)
+                    self.ech_configs.extend(eche.data.data)
                 case _:
                     logger.warning(f"Ignoring server extension extension of type {ext.typ}")
 
@@ -446,22 +446,18 @@ class ClientHandshake(AbstractHandshake, PayloadProcessor):
         logger.info(f"Received correct SERVER FINISHED.")
 
         logger.info(f"Sending change cipher spec to server")
-        self._rwriter.send(Record.create(
-            typ     = ContentType.CHANGE_CIPHER_SPEC,
-            version = DEFAULT_LEGACY_VERSION,
-            payload = CCS_PAYLOAD,
-        ))
+        self._rwriter.send(CCS_MESSAGE)
 
-        self._rwriter.rekey(self._cipher, self._hash_alg,
+        self._rwriter.rekey(self._cipher_suite,
                             self.key_calc.client_handshake_traffic_secret)
 
         client_finished = FinishedHandshake.create(self.key_calc.client_finished_verify)
         self._send_hs_msg(client_finished)
         logger.info(f"Sent CLIENT FINISHED. Handshake complete!")
 
-        self._rreader.rekey(self._cipher, self._hash_alg,
+        self._rreader.rekey(self._cipher_suite,
                             self.key_calc.server_application_traffic_secret)
-        self._rwriter.rekey(self._cipher, self._hash_alg,
+        self._rwriter.rekey(self._cipher_suite,
                             self.key_calc.client_application_traffic_secret)
 
         self.state = ClientStates.CONNECTED

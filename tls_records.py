@@ -18,14 +18,21 @@ from tls13_spec import (
     RecordEntry,
     Transcript,
     Alert,
+    CipherSuite,
 )
-from tls_crypto import AeadCipher, Hasher, StreamCipher
+from tls_crypto import StreamCipher
 from tls_keycalc import KeyCalc, KeyCalcMissing
 
 HOST_NAME_TYPE = 0 # for SNI extension
-CCS_PAYLOAD = b'\x01'
 DEFAULT_LEGACY_VERSION = Version.TLS_1_2
 DEFAULT_LEGACY_COMPRESSION = [0]
+
+CCS_PAYLOAD = b'\x01'
+CCS_MESSAGE = Record.create(
+    typ = ContentType.CHANGE_CIPHER_SPEC,
+    version = DEFAULT_LEGACY_VERSION,
+    payload = CCS_PAYLOAD,
+)
 
 class PayloadProcessor(ABC):
     @abstractmethod
@@ -147,9 +154,9 @@ class RecordReader:
         assert self._hs_buffer is None
         self._hs_buffer = val
 
-    def rekey(self, cipher: AeadCipher, hash_alg: Hasher, secret: bytes) -> None:
+    def rekey(self, csuite: CipherSuite, secret: bytes) -> None:
         logger.info(f"rekeying record reader to key {secret.hex()[:16]}...")
-        self._unwrapper = StreamCipher(cipher, hash_alg, secret)
+        self._unwrapper = StreamCipher(csuite, secret)
         self._key_count += 1
 
     def get_next_record(self) -> Record:
@@ -211,9 +218,9 @@ class RecordWriter:
     def max_payload(self) -> int:
         return 2**14 - 17
 
-    def rekey(self, cipher: AeadCipher, hash_alg: Hasher, secret: bytes) -> None:
+    def rekey(self, csuite: CipherSuite, secret: bytes) -> None:
         logger.info(f"rekeying record writer to key {secret.hex()[:16]}...")
-        self.wrapper = StreamCipher(cipher, hash_alg, secret)
+        self.wrapper = StreamCipher(csuite, secret)
         self.key_count += 1
 
     def send(self, record: Record, padding: int = 0) -> None:

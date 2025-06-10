@@ -290,7 +290,7 @@ specs: dict[str, GenSpec] = kwdict(
         ),
     ),
 
-    ECHConfigList = Wrap(Bounded(16, Sequence('ECHConfig'))),
+    ECHConfigList = Wrap(Bounded(16, Sequence('ECHConfigVariant'))),
 
     ServerExtension = Select('ExtensionType', 16, Raw)(
         SERVER_NAME =
@@ -377,7 +377,7 @@ specs: dict[str, GenSpec] = kwdict(
     ),
 
     EchSecrets = Struct(
-        config = 'ECHConfig',
+        config = 'ECHConfigVariant',
         private_key = Bounded(32, Raw),
     ),
 

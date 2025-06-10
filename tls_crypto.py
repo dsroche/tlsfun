@@ -555,10 +555,17 @@ DEFAULT_KEX_MODES: tuple[PskKeyExchangeMode,...] = (
 
 @dataclass
 class StreamCipher:
-    cipher: AeadCipher
-    hash_alg: Hasher
+    csuite: CipherSuite
     secret: bytes
     counter: int = 0
+
+    @cached_property
+    def cipher(self) -> AeadCipher:
+        return get_cipher_alg(self.csuite)
+
+    @cached_property
+    def hash_alg(self) -> Hasher:
+        return get_hash_alg(self.csuite)
 
     @cached_property
     def key(self) -> bytes:
