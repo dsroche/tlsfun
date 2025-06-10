@@ -4,17 +4,18 @@
 
 import socket
 import argparse
+import logging
 
 from tls_common import *
-from tls_server import start_server, server_thread_info
+from tls_server import Server, start_server, server_thread_info
 
 
 class HttpHandler:
     """Simple handler for https connections."""
-    def __call__(self, server):
+    def __call__(self, server: Server) -> None:
         logger.info('waiting for HTTP request from client')
         request = server.recv(1 << 14)
-        hs = server._handshake
+        hs = server.handshake
         logbuf = server_thread_info.log_buffer
         logbuf.seek(0)
         logs = logbuf.read()

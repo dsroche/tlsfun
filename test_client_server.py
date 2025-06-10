@@ -24,26 +24,30 @@ class ServerTest:
         self._ticketer = ServerTicketer()
 
     def go(self, ssock: socket.socket, in_msgs: Iterable[bytes], out_msgs: Iterable[bytes], rseed:int|None=None) -> None:
-        server = Server(self._server_secrets, self._ticketer, rseed)
-        logger.info(f'server trying to connect and send messages')
-        sock, addr = ssock.accept()
-        logger.info(f'got a connection from client on {addr}')
-        server.connect_socket(sock)
-        logger.info(f'server handshake complete')
-        inmit = iter(in_msgs)
-        outit = iter(out_msgs)
-        while True:
-            try:
-                expected = next(inmit)
-            except StopIteration:
-                break
-            im = server.recv(2**14)
-            logger.info(f'server received message {im.decode()}')
-            assert im == expected, f'test case mismatch: server expected {expected.decode()}'
-            om = next(outit)
-            logger.info(f'server sending reply {om.decode()}')
-            server.send(om)
-        logger.info('TEST SUCCESS from server side')
+        try:
+            server = Server(self._server_secrets, self._ticketer, rseed)
+            logger.info(f'server trying to connect and send messages')
+            sock, addr = ssock.accept()
+            logger.info(f'got a connection from client on {addr}')
+            server.connect_socket(sock)
+            logger.info(f'server handshake complete')
+            inmit = iter(in_msgs)
+            outit = iter(out_msgs)
+            while True:
+                try:
+                    expected = next(inmit)
+                except StopIteration:
+                    break
+                im = server.recv(2**14)
+                logger.info(f'server received message {im.decode()}')
+                assert im == expected, f'test case mismatch: server expected {expected.decode()}'
+                om = next(outit)
+                logger.info(f'server sending reply {om.decode()}')
+                server.send(om)
+            logger.info('TEST SUCCESS from server side')
+        except Exception as e:
+            logger.error(f'SERVER FAILED WITH ERROR: {e}')
+            raise
 
 
 class ClientTest:
@@ -52,27 +56,31 @@ class ClientTest:
         self._port = port
 
     def go(self, in_msgs: Iterable[bytes], out_msgs: Iterable[bytes], **ch_args: Any) -> Iterable[TicketInfo]:
-        logger.info(f'client trying to connect and send messages')
-        client = build_client(sni=self._hostname, **ch_args)
-        inmit = iter(in_msgs)
-        outit = iter(out_msgs)
-        with socket.create_connection((self._hostname, self._port), timeout=1) as sock:
-            logger.info('TCP connection to server established')
-            client.connect_socket(sock)
-            logger.info('TLS handshake complete from client perspective')
-            while True:
-                try:
-                    om = next(outit)
-                except StopIteration:
-                    break
-                logger.info(f'client sending request {om.decode()}')
-                client.send(om)
-                expected = next(inmit)
-                im = client.recv(2**14)
-                logger.info(f'client received reply {im.decode()}')
-                assert im == expected, f'test case mismatch: client expected {expected.decode()}'
-        logger.info(f'TEST SUCCESS from client side, returning {len(client.tickets)} tickets')
-        return client.tickets
+        try:
+            logger.info(f'client trying to connect and send messages')
+            client = build_client(sni=self._hostname, **ch_args)
+            inmit = iter(in_msgs)
+            outit = iter(out_msgs)
+            with socket.create_connection((self._hostname, self._port), timeout=1) as sock:
+                logger.info('TCP connection to server established')
+                client.connect_socket(sock)
+                logger.info('TLS handshake complete from client perspective')
+                while True:
+                    try:
+                        om = next(outit)
+                    except StopIteration:
+                        break
+                    logger.info(f'client sending request {om.decode()}')
+                    client.send(om)
+                    expected = next(inmit)
+                    im = client.recv(2**14)
+                    logger.info(f'client received reply {im.decode()}')
+                    assert im == expected, f'test case mismatch: client expected {expected.decode()}'
+            logger.info(f'TEST SUCCESS from client side, returning {len(client.tickets)} tickets')
+            return client.tickets
+        except Exception as e:
+            logger.error(f'CLIENT FAILED WITH ERROR: {e}')
+            raise
 
 
 class _CSTester:

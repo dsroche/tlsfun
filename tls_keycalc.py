@@ -83,8 +83,8 @@ class TicketInfo(TicketInfoStruct):
         """
 
         # find the index
-        for ext in chello.data.extensions:
-            match ext.data:
+        for ext in chello.data.extensions.uncreate():
+            match ext:
                 case PreSharedKeyClientExtension() as psk_ext:
                     break
         else:

@@ -252,7 +252,7 @@ class _Integral(_Fixed, int):
         _Fixed.__init__(self)
         upper = 2**(self._BYTE_LENGTH * 8)
         if not (0 <= value < upper):
-            raise ValueError(f"{value} is not between 0 and {upper}")
+            raise ValueError(f"{value} is not between 0 and {upper-1}")
 
     @classmethod
     def create(cls, value: int) -> Self:

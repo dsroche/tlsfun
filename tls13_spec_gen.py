@@ -403,7 +403,7 @@ specs: dict[str, GenSpec] = kwdict(
 
     ServerTicketPlaintext = Struct(
         cipher_suite = 'CipherSuite',
-        expiration = Uint(8),
+        expiration = Uint(64),
         psk = Bounded(16, Raw),
     ),
 
