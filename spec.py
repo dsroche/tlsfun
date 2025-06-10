@@ -1,6 +1,7 @@
 from typing import Self, BinaryIO, TextIO, get_args, Iterable, Protocol, Any, dataclass_transform, ClassVar, override
 from dataclasses import dataclass, field
 import dataclasses
+from abc import ABC, abstractmethod
 from io import BytesIO
 from sys import stdout
 from enum import IntEnum
@@ -528,6 +529,88 @@ class _SpecEnum(_Fixed, IntEnum):
     @override
     def __str__(self) -> str:
         return f'{type(self).__name__}.{self.name}'
+
+class _NamedConstBaseBase[T: IntEnum, V: _Integral](Spec, ABC):
+    _T: type[T]
+    _V: type[V]
+    _alternate_values: dict[int,T] = {}
+    _default_typ: T|None = None
+    _CREATE_FROM = (('value', int),)
+
+    @classmethod
+    def create(cls, value: int) -> Self:
+        obj = object.__new__(cls)
+        obj._subclass_init(value)
+        return obj
+
+    @abstractmethod
+    def _subclass_init(self, value: int) -> None: ...
+
+@dataclass(frozen=True)
+class _NamedConstBase[T: IntEnum, V: _Integral](_NamedConstBaseBase[T,V]):
+    typ: T
+    value: V
+
+    @property
+    def name(self) -> str:
+        return self.typ.name
+
+    @override
+    def _subclass_init(self, value: int) -> None:
+        value = self._V(value)
+        try:
+            typ = self._T(value)
+        except ValueError:
+            try:
+                typ = self._alternate_values[value]
+            except KeyError:
+                if self._default_typ is not None:
+                    typ = self._default_typ
+                else:
+                    raise ValueError(f"Value {value} invalid for {type(self).__name__}")
+        _NamedConstBase.__init__(self, typ=typ, value=value)
+
+    @override
+    def jsonify(self) -> Json:
+        return self.value.jsonify()
+
+    @override
+    @classmethod
+    def from_json(cls, obj: Json) -> Self:
+        if isinstance(obj, int):
+            return cls.create(obj)
+        else:
+            raise UnpackError(obj, f"SpecEnum in Json should be int, got {obj}")
+
+    @override
+    def packed_size(self) -> int:
+        return self.value.packed_size()
+
+    @override
+    def pack(self) -> bytes:
+        return self.value.pack()
+
+    @override
+    def pack_to(self, dest: BinaryIO) -> int:
+        return self.value.pack_to(dest)
+
+    @override
+    @classmethod
+    def unpack(cls, raw: bytes) -> Self:
+        return cls.create(cls._V.unpack(raw))
+
+    @override
+    @classmethod
+    def unpack_from(cls, src: LimitReader) -> Self:
+        return cls.create(cls._V.unpack_from(src))
+
+    def __str__(self) -> str:
+        return f'{type(self).__name__}<{self.name},{self.value}>'
+
+    @classmethod
+    def __getitem__(cls, name: str) -> Self:
+        return cls.create(cls._T[name])
+
 
 class _Const[T: Spec](Spec):
     VALUE: T

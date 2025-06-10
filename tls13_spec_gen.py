@@ -11,6 +11,7 @@ from spec import (
 from spec_gen import (
     GenSpec,
     EnumSpec,
+    NamedConst,
     Struct,
     Uint,
     Sequence,
@@ -22,6 +23,11 @@ from spec_gen import (
 )
 
 specs: dict[str, GenSpec] = kwdict(
+    Junk = NamedConst(16, 'Y')(
+        X = 100,
+        Y = 200,
+        Z = (300, 400, 500),
+    ),
     ClientState = EnumSpec(8)(
         # rfc8446#appendix-A.1
         START         = 0,

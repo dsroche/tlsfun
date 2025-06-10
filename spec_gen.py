@@ -363,6 +363,112 @@ class EnumSpec:
             _members = tuple(kwargs.items()),
         )
 
+@dataclass(frozen=True)
+class _NamedConstEnum(GenSpec):
+    members: tuple[tuple[str,int], ...]
+
+    def __post_init__(self) -> None:
+        self.suggest('NamedConstEnum', 10)
+
+    @override
+    def create_from(self, names: OneToOne[GenSpec,str]) -> Iterable[tuple[str,str]]:
+        return (('value', 'int'),)
+
+    @override
+    def generate(self, dest: TextIO, names: OneToOne['GenSpec',str]) -> None:
+        dest.write(f"class {names[self]}(enum.IntEnum):\n")
+        for name,value in self.members:
+            dest.write(f"    {name} = {value}\n")
+
+
+@dataclass(frozen=True)
+class _NamedConst(GenSpec):
+    enum_type: _NamedConstEnum
+    vt: Uint
+    default: str|None
+    alts: tuple[tuple[int, str],...]
+
+    def __post_init__(self) -> None:
+        self.update_stub('NamedConst', 10)
+
+    @override
+    def create_from(self, names: OneToOne[GenSpec,str]) -> Iterable[tuple[str,str]]:
+        return (('value', 'int'),)
+
+    @override
+    def suggest(self, name: str, rank: float) -> bool:
+        if self.update_stub(name, rank):
+            self.enum_type.suggest(f"{self.stub}s", min(rank, 60))
+            return True
+        else:
+            return False
+
+    @override
+    def generate(self, dest: TextIO, names: OneToOne[GenSpec,str]) -> None:
+        tname = get_name(self.enum_type, names)
+        vname = names[self.vt]
+        dest.write(dedent(f"""\
+            class {names[self]}(spec._NamedConstBase[{tname}, {vname}]):
+                _T = {tname}
+                _V = {vname}
+            """))
+        if self.alts:
+            dest.write(f"    _alternate_values = {{{', '.join(f'{val}:{tname}.{name}' for val,name in self.alts)}}}\n")
+        if self.default:
+            dest.write(f"    _default_typ = {tname}.{self.default}\n")
+        dest.write(indent(dedent(f"""
+            def __init__(self, value: int) -> None:
+                self._subclass_init(value)
+            """), '    '))
+
+    @override
+    def prereqs(self) -> Iterable[Nested]:
+        yield self.vt
+        yield self.enum_type
+
+@dataclass
+class NamedConst:
+    bit_length: int
+    default: str|None = None
+
+    def __call__(self, **kwargs: int|tuple[int,...]) -> _NamedConst:
+        members = []
+        alts = []
+        all_values = set()
+
+        def add_val(val: int) -> None:
+            if val in all_values:
+                raise ValueError(f"duplicate value {val}")
+            elif not 0 <= val < 2**self.bit_length:
+                raise ValueError(f"value {val} does not fit in {self.bit_length} bits")
+            all_values.add(val)
+
+        for name, second in kwargs.items():
+            match second:
+                case ():
+                    raise ValueError(f"no values for {name}")
+                case int() as val:
+                    add_val(val)
+                    members.append((name, val))
+                case tuple() as values:
+                    assert len(values) >= 1
+                    for val in values:
+                        add_val(val)
+                    members.append((name, values[0]))
+                    for val in values[1:]:
+                        alts.append((val, name))
+
+        match self.default:
+            case str():
+                if not any(name == self.default for (name,_) in members):
+                    raise ValueError(f"default {self.default} not in enum list")
+
+        return _NamedConst(
+            enum_type = _NamedConstEnum(tuple(members)),
+            vt        = Uint(self.bit_length),
+            default   = self.default,
+            alts      = tuple(alts),
+        )
 
 @flyweight
 @dataclass(frozen=True)
