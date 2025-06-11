@@ -56,33 +56,50 @@ def test_error(cls: type[Spec], js: Json, rawhex: str) -> None:
         raise AssertionError(f'{cls}.unpack({rawhex}) should be ValueError')
 
 def positive_test_cases() -> Iterable[tuple[Spec, Json, str]]:
-    yield Day.Tuesday, {'name':'Tuesday','value':2}, '02'
-    yield Month.May, {'name':'May','value':5}, '0005'
-    yield Uint24(258), 258, '000102'
+    yield ContentType.ALERT, {'name': 'ALERT', 'value': 21}, '15'
+    yield (ExtensionType.create(100),
+           {'name':'UNRECOGNIZED', 'value':100},
+           '0064')
+    yield (ExtensionType.create(0xdada),
+           {'name':'GREASE', 'value': 0xdada},
+           'dada')
+    yield (PskKeyExchangeMode.GREASE,
+           {'name':'GREASE', 'value':0x0b},
+           '0b')
     yield Uint8(17), 17, '11'
     yield String('abcd'), 'abcd', '61626364'
     yield Raw(b'bb'), '6262', '6262'
-    yield String16('abcd'), 'abcd', '000461626364'
-    yield Raw8(b''), '', '00'
-    yield Raw16(b'cab'), '636162', '0003636162'
+    yield B16String('abcd'), 'abcd', '000461626364'
+    yield B8Raw(b''), '', '00'
+    yield B16Raw(b'cab'), '636162', '0003636162'
     yield Uint16(5), 5, '0005'
-    yield Shorts([Uint16(20), Uint16(25)]), [20,25], '00140019'
-    yield ShortShorts([Uint16(3),Uint16(4),Uint16(5)]), [3,4,5], '06000300040005'
-    #yield B16S8((Uint8(10), Uint8(20))), [10,20], '00020a14'
-    yield (BrassInstrument.create(valves=5, weight=40).parent(),
-           {'selector': {'name': 'Brass', 'value': 1}, 'data': {'valves': 5, 'weight': 40},},
-           '01050028')
-#    test_spec(Uint8, 33, 33, '21')
-#    test_spec(Uint16, 50, 50, '0032')
-#    test_spec(Raw8, b'abc', '616263', '03616263')
-#    test_spec(Raw16, b'', '', '0000')
-#    test_spec(String8, 'abcd', 'abcd', '0461626364')
-#    test_spec(String16, 'bb', 'bb', '00026262')
+    yield (HkdfLabel.create(5,b'ab',b'cde'),
+           {'length':5, 'label':'6162', 'context':'636465'},
+           '000502616203636465')
+    yield (PskBinders.create([b'aa', b'bbccdd']),
+           ['6161', '626263636464'],
+           '000a02616106626263636464')
+    yield (KeyShareServerExtension.create(NamedGroup.X448,b'ace').parent(),
+           {'selector': {'name':'KEY_SHARE', 'value':51},
+            'data': {'group': {'name':'X448', 'value':0x001e},
+                     'pubkey': '616365'}},
+           '00330007001e0003616365')
+    yield (PskKeyExchangeModesClientExtension.create([0x0b,1,0xe4]),
+           {'selector': {'name': 'PSK_KEY_EXCHANGE_MODES', 'value': 45},
+            'data': [{'name':'GREASE', 'value':0x0b},
+                     {'name':'PSK_DHE_KE', 'value':1},
+                     {'name':'GREASE', 'value':0xe4}]},
+           '002d0004030b01e4')
+    yield B8Raw.create(b''), '', '00'
 
 def error_test_cases() -> Iterable[tuple[type[Spec], Json, str]]:
-    yield Day, 10, ''
-    yield Month, 1, '0100'
     yield Uint8, -3, 'ffff'
+    yield B16Raw, [], '0001aabb'
+    yield HandshakeType, {'name':'FINISHED', 'value':15}, '10'
+    yield (ClientExtension,
+           {'selector': {'name':'PRE_SHARED_KEY', 'value':41},
+            'data': {'binders':[]}},
+           '0029000600000000')
 
 def all_tests() -> None:
     count = 0

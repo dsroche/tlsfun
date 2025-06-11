@@ -480,8 +480,11 @@ class _StructBase(Spec):
     @classmethod
     def from_json(cls, obj: Json) -> Self:
         if isinstance(obj, dict):
-            accum = {name: typ.from_json(obj[name])
-                     for (name,typ) in zip(cls._member_names, cls._member_types)}
+            try:
+                accum = {name: typ.from_json(obj[name])
+                        for (name,typ) in zip(cls._member_names, cls._member_types)}
+            except KeyError as e:
+                raise UnpackError(obj, 'missing field in json unpack') from e
             return cls(**accum)
         raise UnpackError(obj, "expected dict, got {obj}")
 

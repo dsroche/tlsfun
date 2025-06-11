@@ -22,6 +22,36 @@ from spec_gen import (
     generate_specs,
 )
 
+# https://datatracker.ietf.org/doc/html/rfc8701#name-grease-values
+grease8 = (
+    0x0B,
+    0x2A,
+    0x49,
+    0x68,
+    0x87,
+    0xA6,
+    0xC5,
+    0xE4,
+)
+grease16 = (
+    0x0A0A,
+    0x1A1A,
+    0x2A2A,
+    0x3A3A,
+    0x4A4A,
+    0x5A5A,
+    0x6A6A,
+    0x7A7A,
+    0x8A8A,
+    0x9A9A,
+    0xAAAA,
+    0xBABA,
+    0xCACA,
+    0xDADA,
+    0xEAEA,
+    0xFAFA,
+)
+
 specs: dict[str, GenSpec] = kwdict(
     ClientState = NamedConst(8)(
         # rfc8446#appendix-A.1
@@ -69,7 +99,7 @@ specs: dict[str, GenSpec] = kwdict(
         KEY_UPDATE           = 24,
         MESSAGE_HASH         = 254,
     ),
-    ExtensionType = NamedConst(16, 'UNSUPPORTED')(
+    ExtensionType = NamedConst(16, 'UNRECOGNIZED')(
         SERVER_NAME                            = 0,
         MAX_FRAGMENT_LENGTH                    = 1,
         STATUS_REQUEST                         = 5,
@@ -97,8 +127,9 @@ specs: dict[str, GenSpec] = kwdict(
         SIGNATURE_ALGORITHMS_CERT              = 50,
         KEY_SHARE                              = 51,
         TICKET_REQUEST                         = 58,
-        UNSUPPORTED                            = 2570,
         ENCRYPTED_CLIENT_HELLO                 = 65037,
+	    GREASE                                 = grease16,
+        UNRECOGNIZED                           = 65000,
     ),
     SignatureScheme = NamedConst(16)(
         RSA_PKCS1_SHA256       = 0x0401,
@@ -117,6 +148,7 @@ specs: dict[str, GenSpec] = kwdict(
         RSA_PSS_PSS_SHA512     = 0x080b,
         RSA_PKCS1_SHA1         = 0x0201,
         ECDSA_SHA1             = 0x0203,
+        GREASE                 = grease16,
     ),
     NamedGroup = NamedConst(16, 'UNSUPPORTED')(
         SECP256R1   = 0x0017,
@@ -129,20 +161,22 @@ specs: dict[str, GenSpec] = kwdict(
         FFDHE4096   = 0x0102,
         FFDHE6144   = 0x0103,
         FFDHE8192   = 0x0104,
+        GREASE      = grease16,
         UNSUPPORTED = 0xFFFF,
     ),
-    CipherSuite = NamedConst(16, 'UNSUPPORTED')(
+    CipherSuite = NamedConst(16)(
         TLS_AES_128_GCM_SHA256                   = 0x1301,
         TLS_AES_256_GCM_SHA384                   = 0x1302,
         TLS_CHACHA20_POLY1305_SHA256             = 0x1303,
         TLS_AES_128_CCM_SHA256                   = 0x1304,
         TLS_AES_128_CCM_8_SHA256                 = 0x1305,
         LEGACY_TLS_EMPTY_RENEGOTIATION_INFO_SCSV = 0x00ff,
-        UNSUPPORTED                              = 0x4a4a,
+        GREASE                                   = grease16,
     ),
     PskKeyExchangeMode = NamedConst(8)(
         PSK_KE     = 0,
         PSK_DHE_KE = 1,
+        GREASE     = grease8,
     ),
     CertificateType = NamedConst(8)(
         X509         = 0,
@@ -152,6 +186,7 @@ specs: dict[str, GenSpec] = kwdict(
         TLS_1_0 = 0x0301,
         TLS_1_2 = 0x0303,
         TLS_1_3 = 0x0304,
+        GREASE  = grease16,
     ),
     AlertLevel = NamedConst(8)(
         WARNING = 1,
@@ -233,7 +268,7 @@ specs: dict[str, GenSpec] = kwdict(
     ClientExtension = Select('ExtensionType', 16, Raw)(
         SERVER_NAME =
             Sequence(Bounded(16, Struct(
-                name_type = Uint(8), # TODO FIXME .const(0),
+                name_type = Uint(8),
                 host_name = Bounded(16, String),
             ))),
         SUPPORTED_GROUPS =
@@ -322,19 +357,19 @@ specs: dict[str, GenSpec] = kwdict(
 
     Handshake = Select('HandshakeType', 24)(
         CLIENT_HELLO = Struct(
-            legacy_version     = 'Version', # FIXME Version.TLS_1_2.as_const(),
+            legacy_version     = 'Version',
             client_random      = FixRaw(32),
             session_id         = Bounded(8, Raw),
             ciphers            = Bounded(16, Sequence('CipherSuite')),
-            legacy_compression = Bounded(8, Sequence(Uint(8))), # FIXME .const([0]),
+            legacy_compression = Bounded(8, Sequence(Uint(8))),
             extensions         = Bounded(16, Sequence('ClientExtension')),
         ),
         SERVER_HELLO = Struct(
-            legacy_version     = 'Version', # FIXME .TLS_1_2.as_const(),
+            legacy_version     = 'Version',
             server_random      = FixRaw(32),
             session_id         = Bounded(8, Raw),
             cipher_suite       = 'CipherSuite',
-            legacy_compression = Uint(8), # FIXME .const(0),
+            legacy_compression = Uint(8),
             extensions         = 'ServerExtensionList',
         ),
         ENCRYPTED_EXTENSIONS = 'ServerExtensionList',
@@ -433,49 +468,6 @@ specs: dict[str, GenSpec] = kwdict(
         psk = Bounded(8, Raw),
         kex_secret = Bounded(8, Raw),
         records = Bounded(32, Sequence('RecordEntry')),
-    ),
-
-    #### XXX remove below TODO
-
-    Happy = Wrap(Uint(32)),
-
-    Day = NamedConst(8)(
-        Monday = 1,
-        Tuesday = 2,
-    ),
-    Month = NamedConst(16)(
-        February = 2,
-        May = 5,
-    ),
-    Uint8 = Uint(8),
-    Uint24 = Uint(24),
-    Raw8 = Bounded(8, Raw),
-    Raw16 = Bounded(16, Raw),
-    String8 = Bounded(8, String),
-    String16 = Bounded(16, String),
-    Shorts = Sequence(Uint(16)),
-    ShortShorts = Bounded(8, Sequence(Uint(16))),
-    B16S8 = Bounded(16, Sequence(Uint(8))),
-    Person = Struct(
-        name = 'String16',
-        phone = Uint(16),
-    ),
-    Animal = Struct(
-        name = Bounded(8, String),
-        legs = Uint(8),
-        nums = Bounded(8, Sequence(Uint(16))),
-    ),
-    InstrumentType = NamedConst(8)(
-        Brass = 1,
-        Woodwind = 2,
-        Strings = 3,
-    ),
-    Instrument = Select('InstrumentType')(
-        Brass = Struct(
-            valves = 'Uint8',
-            weight = Uint(16),
-        ),
-        Woodwind = Bounded(8, String),
     ),
 )
 
