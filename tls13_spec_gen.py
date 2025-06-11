@@ -164,7 +164,7 @@ specs: dict[str, GenSpec] = kwdict(
         GREASE      = grease16,
         UNSUPPORTED = 0xFFFF,
     ),
-    CipherSuite = NamedConst(16)(
+    CipherSuite = NamedConst(16, 'UNSUPPORTED')(
         TLS_AES_128_GCM_SHA256                   = 0x1301,
         TLS_AES_256_GCM_SHA384                   = 0x1302,
         TLS_CHACHA20_POLY1305_SHA256             = 0x1303,
@@ -172,6 +172,7 @@ specs: dict[str, GenSpec] = kwdict(
         TLS_AES_128_CCM_8_SHA256                 = 0x1305,
         LEGACY_TLS_EMPTY_RENEGOTIATION_INFO_SCSV = 0x00ff,
         GREASE                                   = grease16,
+        UNSUPPORTED                              = 0xffff,
     ),
     PskKeyExchangeMode = NamedConst(8)(
         PSK_KE     = 0,
